@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 2.4 (Dry Run Event Fix)
+// == Version: 3.0.0 (FSM)
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -9,10 +9,6 @@
 // == the GENERATION_STARTED event to prepare the state, fixing race conditions.
 // == It also includes a sandboxed EVAL command for user-defined functions.
 // ==
-// == v2.4 Fix: Replaces the manual phantom event flag with a proper check for
-// == the 'dry_run' parameter in the GENERATION_STARTED event. This is a
-// == cleaner, more reliable way to ignore generation events that are not
-// == intended to produce a new message (e.g., after a user message delete).
 // ============================================================================
 
 (function () {
@@ -27,28 +23,59 @@
     const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
 
+    // impossible to see ended -> ended -> ended -> ended.....
+    // therefore we only take the first ended. -> we detect this only if the previous detected EVENT is NOT ended.
+
+
+    // FSM implementation strategy
+
+    const STATES = {
+        IDLE: "IDLE",
+        AWAIT_REGENERATION: "AWAIT_REGENERATION",
+        AWAIT_GENERATION: "AWAIT_GENERATION",
+        PROCESSING: "PROCESSING"
+    };
+    
+    // set curr_state and next_state
+    var curr_state = STATES.IDLE;
+
+    // do a queue-based event handler.
+    const event_queue = [];
+
+
+
+
+
     // --- SCRIPT LIFECYCLE MANAGEMENT ---
     // This key is used to store our event handlers on the global window object.
     // This allows a new instance of the script to find and remove the listeners
-    // from the old instance, preventing the "multiple listener" error.
-    const HANDLER_STORAGE_KEY = `__SAM_V2_EVENT_HANDLERS__`;
+    // from an old instance, preventing the "multiple listener" bug on script reloads.
+    const HANDLER_STORAGE_KEY = `__SAM_V2.4.1_EVENT_HANDLERS__`;
 
-    // This function can remove listeners using a given handler object.
-    const cleanupListeners = (handlers) => {
-        if (!handlers) return;
-        console.log(`[${SCRIPT_NAME}] Removing listeners from a previous instance.`);
-        eventRemoveListener(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
-        eventRemoveListener(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
-        eventRemoveListener(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
-        eventRemoveListener(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
-        eventRemoveListener(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
-        eventRemoveListener(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+    // This function is called by a new script instance to remove listeners
+    // from a previously loaded instance.
+    const cleanupPreviousInstance = () => {
+        const oldHandlers = window[HANDLER_STORAGE_KEY];
+        if (!oldHandlers) {
+            console.log(`[${SCRIPT_NAME}] No previous instance found. Starting fresh.`);
+            return;
+        }
+
+        console.log(`[${SCRIPT_NAME}] Found a previous instance. Removing its event listeners to prevent duplicates.`);
+        eventRemoveListener(tavern_events.GENERATION_STARTED, oldHandlers.handleGenerationStarted);
+        eventRemoveListener(tavern_events.GENERATION_ENDED, oldHandlers.handleGenerationEnded);
+        eventRemoveListener(tavern_events.MESSAGE_SWIPED, oldHandlers.handleMessageSwiped);
+        eventRemoveListener(tavern_events.MESSAGE_DELETED, oldHandlers.handleMessageDeleted);
+        eventRemoveListener(tavern_events.MESSAGE_EDITED, oldHandlers.handleMessageEdited);
+        eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
+        eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
+        eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
+
+
+        // Once the old listeners are gone, we can remove the old handler object.
+        delete window[HANDLER_STORAGE_KEY];
     };
 
-    // On script load, check if an old set of handlers exists on the window and clean them up.
-    if (window[HANDLER_STORAGE_KEY]) {
-        cleanupListeners(window[HANDLER_STORAGE_KEY]);
-    }
 
     // --- Command Explanations ---
     // SET:          Sets a variable to a value. <SET :: path.to.var :: value>
@@ -114,6 +141,20 @@
         console.log(`[${SCRIPT_NAME}] No previous state found. Using initial state.`);
         return _.cloneDeep(INITIAL_STATE);
     }
+
+
+    // not going to be used anymore when we have swipe length detection. 
+    // it does not accurately detect swipes to unknown space. We need to detect swipes to non-existent previous indices
+    // to know that we're swiping to generate a new response. 
+    function findLatestUserMsgIndex(){
+        for (let i = SillyTavern.chat.length -1; i >= 0; i--){
+            const message = SillyTavern.chat[i];
+            if (message.is_user){
+                return i;
+            }
+        }
+        return -1;
+    }
     
     function goodCopy(state) {
         return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE);
@@ -170,14 +211,22 @@
         if (!state.volatile || !state.volatile.length) return [];
         const promotedCommands = [];
         const remainingVolatiles = [];
+        
+        const deleted = [];
+
         const currentRound = await getRoundCounter();
         const currentTime = new Date();
         for (const volatile of state.volatile) {
             const [varName, varValue, isGameTime, targetTime] = volatile;
-            let triggered = isGameTime ? (currentTime >= new Date(targetTime)) : (currentRound >= targetTime);
+            let triggered = isGameTime ? (new Date(String(currentTime)) >= new Date(targetTime)) : (currentRound >= targetTime);
             if (triggered) {
                 promotedCommands.push({ type: 'SET', params: `${varName} :: ${varValue}` });
             } else {
+
+                if (targetTime) {
+
+                }
+
                 remainingVolatiles.push(volatile);
             }
         }
@@ -187,6 +236,11 @@
 
     async function applyCommandsToState(commands, state) {
         const currentRound = await getRoundCounter();
+
+        // keep all the modified list paths here.
+        let modifiedListPaths = new Set();
+        
+
         for (const command of commands) {
             let params = command.params.split('::').map(p => p.trim());
             
@@ -232,7 +286,7 @@
                     case 'TIMED_SET': {
                         const [varName, varValue, reason, isGameTimeStr, timeUnitsStr] = params;
                         if (!varName || !varValue || !reason || !isGameTimeStr || !timeUnitsStr) continue;
-                        const isGameTime = isGameTimeStr.toLowerCase() === 'true';
+                        const isGameTime = isGameTimeStr.toLowerCase() === 'true' || isGameTimeStr === 1;
                         const finalValue = isNaN(varValue) ? tryParseJSON(varValue) : Number(varValue);
                         const targetTime = isGameTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
                         if(!state.volatile) state.volatile = [];
@@ -261,7 +315,8 @@
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) continue;
                         if (index >= 0 && index < list.length) {
-                            list.splice(index, 1);
+                            list[index] = undefined;
+                            modifiedListPaths.add(listPath);
                         }
                         break;
                     }
@@ -287,6 +342,13 @@
                 console.error(`[${SCRIPT_NAME}] Error processing command: ${JSON.stringify(command)}`, error);
             }
         }
+
+        // handle DELs properly.
+        for (const path of modifiedListPaths){
+            const list = _.get(state.static, path);
+            _.remove(list, (item) => item === undefined);
+        }
+
         return state;
     }
 
@@ -294,7 +356,10 @@
     async function processMessageState(index) {
         console.log(`[SAM] processing message state at ${index}`);
 
-        if (isProcessingState) return;
+        if (isProcessingState) {
+            console.warn(`[SAM] Aborting processMessageState: Already processing.`);
+            return;
+        }
         isProcessingState = true;
         
         try {
@@ -308,7 +373,6 @@
             const promotedCommands = await processVolatileUpdates(state);
             const messageContent = lastAIMessage.mes;
 
-            //console.log(`[SAM] got message content: ${messageContent}`);
             COMMAND_REGEX.lastIndex = 0; 
 
             let match;
@@ -341,6 +405,7 @@
         if (index === "{{lastMessageId}}") {
             index = SillyTavern.chat.length - 1;
         }
+
         try {
             const message = SillyTavern.chat[index];
             if (!message) return;
@@ -371,154 +436,273 @@
         return -1;
     }
 
-    // --- EVENT HANDLER DEFINITIONS ---
-    const eventHandlers = {
-        handleGenerationStarted: async (ev, options, dry_run) => {
-            // NEW (v2.4): The GENERATION_STARTED event includes a 'dry_run' flag for
-            // actions that won't result in a new message. We check for this and
-            // ignore the event to prevent incorrect state loading.
-            console.log(`[SAM] Trying to determine if this is a dry run`);
-            if (dry_run === true) {
-                console.log(`[${SCRIPT_NAME}] Ignoring GENERATION_STARTED event (dry_run=true).`);
-                return;
-            }
 
-            console.log(`[${SCRIPT_NAME}] Generation started, preparing state.`);
-            try {
-                // The last message in the chat is the one causing the generation.
-                const lastMessageIndex = SillyTavern.chat.length - 1;
-                const lastMessage = SillyTavern.chat[lastMessageIndex];
+
+
+    // brief function to help sync.
+    async function sync_latest_state(){
+        var lastlastAIMessageIdx = await findLastAiMessageAndIndex();
+        await loadStateFromMessage(lastlastAIMessageIdx);
+    }
+
+    // handlers are requested to pass their event (tavern_events... and related information (ex. ev, options, dry_run...) to the dispatcher.
+    // specifically the handler to handle generation_begin will have to pass event, ev, options, dry_run to the dispatcher.
+    // actually a mealy machine. State updates and processing happens in same cycle.
+    async function dispatcher(event, ...event_params){
+
+        // this log triggers ERRORS!
+        /*
+        console.log(
+        `[SAM] [FSM Dispatcher] FSM Dispatcher called from event ${event} with params ${JSON.stringify(event_params)}.
+        stats: 
+        Dispatcher invoked at time = ${Date()}
+        Current chat length = ${SillyTavern?.chat?.length}
+        Current swipe ID = ${SillyTavern.chat[SillyTavern?.chat?.length -1].swipe_id}
+        Total swipe ID = ${SillyTavern?.chat[SillyTavern.chat.length -1]?.swipes.length}
+        `);
+        */
+        console.log(
+        `[SAM] [FSM Dispatcher] FSM Dispatcher called from event ${event} with params ${JSON.stringify(event_params)}.
+        stats: 
+        current state = ${curr_state}
+        Dispatcher invoked at time = ${Date()}
+        current chat length = ${SillyTavern.chat.length}
+        `);
+
+        // restructure 1: To Mealy FSM
+
+        try{
+
+            switch(curr_state){
+
+                case STATES.IDLE: {
+
+                    switch (event) {
+                        case tavern_events.GENERATION_STARTED: {
+
+                            // do nothing if it is a dry run
+                            if (event_params[2]) {
+                                console.log("[SAM] [IDLE handler] Dry run detected, aborting FSM Dispatcher");
+                                return;
+                            }
+
+
+                            if (event_params[0] === "swipe" ){
+
+                                console.log("[SAM] [IDLE handler] Swipe generate to GENERATE during IDLE detected.")
+                                await sync_latest_state();
+                            }
+
+                            // generally do nothing here. We transition to waiting for generation
+                            curr_state = STATES.AWAIT_GENERATION;
+
+                            break;
+                        }
+
+                        case tavern_events.MESSAGE_SENT : {
+                            // message is being sent. 
+                            
+                            curr_state = STATES.AWAIT_GENERATION;
+                            break;
+
+                        }
+
+                        case tavern_events.MESSAGE_SWIPED : {
+
+                            try{
+
+                            await sync_latest_state();
+                            
+
+                            }catch(e){
+                                console.log(`[SAM][IDLE handler] Message swiped error: ${e}`)
+                            }
+
+                            break;
+                        }
+
+                        default:
+                            console.log("[SAM] [IDLE handler] Reloading state.");
+                            await sync_latest_state();
+                            break;       
+                    }
+                    break;
+                }
+
                 
-                let sourceStateIndex;
-                // fixed logic.
-                if (lastMessage && (parseStateFromMessage(lastMessage.mes) != null)) {
-                    // This is a swipe or regeneration. The state should come from the AI message BEFORE this one.
-                    console.log(`[SAM] Detected swipe/regen. Finding state before index ${lastMessageIndex}.`);
-                    sourceStateIndex = await findLastAiMessageAndIndex(lastMessageIndex);
-                } else {
-                    // This is a new message generation. The state comes from the most recent AI message.
-                    console.log(`[SAM] Detected new message. Finding latest state.`);
-                    sourceStateIndex = await findLastAiMessageAndIndex();
+                case STATES.AWAIT_GENERATION: {
+
+                    switch (event){
+
+                        case tavern_events.GENERATION_STOPPED:
+                        case tavern_events.GENERATION_ENDED: {
+                            curr_state = STATES.PROCESSING;
+
+                            console.log("[SAM] [AWAIT_GENERATION handler] Deciphering latest message");
+                            await new Promise(resolve => setTimeout(resolve, 500));
+                            const index = SillyTavern.chat.length - 1;
+                            await processMessageState(index);
+
+
+                            console.log('[SAM] [AWAIT_GENERATION handler] Processing complete. Transitioning back to IDLE.');
+                            curr_state = STATES.IDLE;
+                            break;
+                        }
+                        case tavern_events.CHAT_CHANGED: {
+                            console.log('[SAM] [AWAIT_GENERATION handler] Chat changed during generation. Aborting and returning to IDLE.');
+                            await sync_latest_state();
+                            curr_state = STATES.IDLE;
+                            break;
+                        }
+
+                    }
+                    break;
                 }
 
-                if (sourceStateIndex !== -1) {
-                    console.log(`[SAM] Loading state from message at index ${sourceStateIndex} for new generation.`);
-                    await loadStateFromMessage(sourceStateIndex);
-                } else {
-                    console.log(`[SAM] No prior state found for new generation. Using initial state.`);
-                    await replaceVariables(_.cloneDeep(INITIAL_STATE));
+                case STATES.PROCESSING: {
+                    console.warn(`[SAM] [PROCESSING handler] Received event ${event} while in PROCESSING state. Ignoring.`);
+                    break;
                 }
-            } catch (error) {
-                console.error(`[${SCRIPT_NAME}] Error in GENERATION_STARTED handler:`, error);
+
             }
-        },
-        handleGenerationEnded: async () => {
-            console.log(`[${SCRIPT_NAME}] Generation ended, processing state.`);
+
+
+        }catch(e){
+            console.log(`[SAM] [Dispatcher] FSM Scheduling failed. Error reason: ${e}`);
+        }
+    }
+
+
+
+
+    // --- MAIN EXECUTION & UNIFIED EVENT HANDLER ---
+
+    // A lock to ensure only one event is being processed by the dispatcher at a time.
+    let isDispatching = false;
+
+    async function unifiedEventHandler(event, ...args) {
+        // move on to event queue-based handling to not miss a single generation_stopped or something like that.
+        // when received, push one event out. then re-invoke if there is still thing in the queue.
+        console.log(`[SAM] [Unified event handler] pushing next EVENT [${event}] to queue and invoking executor [UDE].`);
+        event_queue.push({event_id: event, args: [...args]});
+        unified_dispatch_executor(); // Kick off the processor, which will only run if not already running.
+    }
+
+
+    async function unified_dispatch_executor(){
+        console.log("[SAM] unified dispatch executor running");
+        
+        if (isDispatching){
+            console.warn("[SAM] already running dispatcher.");
+            return;
+
+        }
+        isDispatching = true;
+
+        while (event_queue.length > 0) {
+            const { event_id, args } = event_queue.shift(); // Get the oldest event
+            console.log(`[SAM] [Unified Event Executor] Dequeuing and dispatching event: ${event_id}`);
             try {
-                // The new message is now the last one in the chat.
-                const index = SillyTavern.chat.length - 1;
-                await processMessageState(index);
+                await dispatcher(event_id, ...args);
             } catch (error) {
-                console.error(`[${SCRIPT_NAME}] Error in GENERATION_ENDED handler:`, error);
+                console.error(`[SAM] [Unified Event Executor] Unhandled error during dispatch of ${event_id}:`, error);
+                currentState = STATES.IDLE; // Failsafe reset
             }
-        },
-        handleMessageSwiped: async () => {
-            console.log(`[${SCRIPT_NAME}] Message swiped, reloading state for current view.`);
-            try {
-                // The chat is already updated. We just need to load the state from the now-current last AI message.
-                const lastAiIndex = await findLastAiMessageAndIndex();
-                if (lastAiIndex !== -1) {
-                    await loadStateFromMessage(lastAiIndex);
-                } else {
-                    // If there are no AI messages left after the swipe, reset to initial state.
-                    await eventHandlers.initializeOrReloadStateForCurrentChat();
-                }
-            } catch (error) {
-                console.error(`[${SCRIPT_NAME}] Error in MESSAGE_SWIPED handler:`, error);
+        }
+
+        isDispatching = false;
+        console.log(`[SAM] [Unified Event Executor] Queue empty. Processor going idle.`);
+
+    }
+
+
+    const handlers = {
+            // We need to keep a reference to the anonymous functions to be able to remove them later.
+            handleGenerationStarted: async (ev, options, dry_run) => {
+                
+                await unifiedEventHandler(tavern_events.GENERATION_STARTED, ev, options,dry_run)
+            
+            },
+            handleGenerationEnded: async () => {
+
+                await unifiedEventHandler(tavern_events.GENERATION_ENDED)
+            
+            },
+            handleMessageSwiped: async () => {
+
+                await unifiedEventHandler(tavern_events.MESSAGE_SWIPED)
+            
+            },
+            handleMessageDeleted: async (message) => {
+                await unifiedEventHandler(tavern_events.MESSAGE_DELETED, message);
+            },
+
+            handleMessageEdited: async () => {
+
+                await unifiedEventHandler(tavern_events.MESSAGE_EDITED)
+            },
+            handleChatChanged: async  () => {
+
+                await unifiedEventHandler(tavern_events.CHAT_CHANGED)
+            },
+            handleMessageSent: async () => {
+
+                await unifiedEventHandler(tavern_events.MESSAGE_SENT)
+            },
+            handleGenerationStopped : async () => {
+
+                await unifiedEventHandler(tavern_events.GENERATION_STOPPED)
             }
-        },
-        // The event provides the deleted message object as the first argument.
-        handleMessageDeleted: async (message) => {
-            console.log(`[${SCRIPT_NAME}] Message deleted, reloading last state`);
-            // The logic to set a flag for phantom events is no longer needed,
-            // as we now handle the 'dry_run' parameter in GENERATION_STARTED.
-            try {
-                const lastAIMessageIndex = await findLastAiMessageAndIndex();
-                if (lastAIMessageIndex !== -1) {
-                    await loadStateFromMessage(lastAIMessageIndex);
-                } else {
-                    await eventHandlers.initializeOrReloadStateForCurrentChat();
-                }
-            } catch (error) {
-                console.error(`[${SCRIPT_NAME}] Error in MESSAGE_DELETED handler:`, error);
-            }
-        },
-        handleMessageEdited: async () => {
-            console.log(`[${SCRIPT_NAME}] Message edited, reloading state.`);
-            try {
-                const lastAiIndex = await findLastAiMessageAndIndex(-1);
-                if (lastAiIndex !== -1) {
-                    await loadStateFromMessage(lastAiIndex);
-                }
-            } catch (error) {
-                console.error(`[${SCRIPT_NAME}] Error in MESSAGE_EDITED handler:`, error);
-            }
-        },
-        handleChatChanged: async () => {
-            console.log(`[${SCRIPT_NAME}] Chat changed, initializing state.`);
-            try {
-                await eventHandlers.initializeOrReloadStateForCurrentChat();
-            } catch (error) {
-                console.error(`[${SCRIPT_NAME}] Error in CHAT_CHANGED handler:`, error);
-            }
-        },
-        initializeOrReloadStateForCurrentChat: async () => {
-            console.log("[SAM] trying to initialize first message");
+        };
+
+    $(() => {
+        // This is the main entry point of the script.
+
+        // Step 1: Clean up any listeners from a previous version of the script.
+        // This is crucial to prevent "ghost" listeners that cause events to fire multiple times.
+        cleanupPreviousInstance();
+
+        // Step 2: Define a standalone initialization function for the first load.
+        // This logic is called once on startup or chat change, outside the main FSM event loop.
+        const initializeOrReloadStateForCurrentChat = async () => {
+
+            let latestAIPos = await findLastAiMessageAndIndex();
+
+
+            console.log("[SAM] Initializing or reloading state for current chat.");
             const lastAiIndex = await findLastAiMessageAndIndex();
-
             if (lastAiIndex === -1) {
                 console.log(`[${SCRIPT_NAME}] No AI messages found. Initializing with default state.`);
                 await replaceVariables(_.cloneDeep(INITIAL_STATE));
             } else {
                 await loadStateFromMessage(lastAiIndex);
-                
             }
-        }
-    };
-    
-    const addAllListeners = () => {
-        console.log(`[${SCRIPT_NAME}] Registering event listeners.`);
-        eventOn(tavern_events.GENERATION_STARTED, eventHandlers.handleGenerationStarted);
-        eventOn(tavern_events.GENERATION_ENDED, eventHandlers.handleGenerationEnded);
-        eventOn(tavern_events.MESSAGE_SWIPED, eventHandlers.handleMessageSwiped);
-        eventOn(tavern_events.MESSAGE_DELETED, eventHandlers.handleMessageDeleted);
-        eventOn(tavern_events.MESSAGE_EDITED, eventHandlers.handleMessageEdited);
-        eventOn(tavern_events.CHAT_CHANGED, eventHandlers.handleChatChanged);
-    };
+            console.log("[SAM] initialization finalized")
+        };
 
-    const cleanListeners = () => {
+        // Step 3: Register the new event listeners, routing them through the unified handler.
+        console.log(`[${SCRIPT_NAME}] Registering new event listeners via the Unified Handler.`);
 
+        eventOn(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
+        eventOn(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
+        eventOn(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
+        eventOn(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
+        eventOn(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
+        eventOn(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+        eventOn(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
+        eventOn(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
 
-    }
-
-    // --- MAIN EXECUTION ---
-    $(() => {
+        // Step 4: Store a reference to the new handlers on the window object.
+        // This allows the *next* script reload to find and clean up this instance.
+        window[HANDLER_STORAGE_KEY] = handlers;
+        
+        // Step 5: Initialize the state for the newly loaded chat.
         try {
-            console.log(`[${SCRIPT_NAME}] V2.4 loading. GLHF, player.`);
-            // The old listeners were already cleaned up. We just need to add the new ones.
-            addAllListeners();
-            // Store the newly created handlers on the window object for the *next* reload.
-            window[HANDLER_STORAGE_KEY] = eventHandlers;
-            // Initialize the state for the current chat.
-            eventHandlers.initializeOrReloadStateForCurrentChat();
+            console.log(`[${SCRIPT_NAME}] V3.0.0 (FSM) loaded. GLHF, player.`);
+            initializeOrReloadStateForCurrentChat();
         } catch (error) {
-            console.error(`[${SCRIPT_NAME}] Error during initialization:`, error);
+            console.error(`[${SCRIPT_NAME}] Error during final initialization:`, error);
         }
     });
 
-    /** 
-    $(window).on('unload', () => {
-        cleanupListeners(window[HANDLER_STORAGE_KEY]);
-    });
-*/
 })();
