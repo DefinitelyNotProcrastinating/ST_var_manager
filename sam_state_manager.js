@@ -685,7 +685,11 @@
         // Step 3: Register the new event listeners, routing them through the unified handler.
         console.log(`[${SCRIPT_NAME}] Registering new event listeners via the Unified Handler.`);
 
-        eventOn(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
+        // make first the generation_started event.
+        // this is actually a gamble. We think that generation started also binds Zonde's Prompt Template plugin upon generation, so we must
+        // do variable updates earlier than Prompt Template processes the text (otherwise our update is not meaningful).
+        eventMakeFirst(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
+
         eventOn(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
         eventOn(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
         eventOn(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
