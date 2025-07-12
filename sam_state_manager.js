@@ -489,8 +489,10 @@
 
                             if (event_params[0] === "swipe" ){
 
-                                console.log("[SAM] [IDLE handler] Swipe generate to GENERATE during IDLE detected.")
-                                await sync_latest_state();
+                                console.log("[SAM] [IDLE handler] Swipe generate to GENERATE during IDLE detected. Loading from before latest user msg.");
+                                const latestUserMsg = await findLatestUserMsgIndex();
+                                await loadStateFromMessage(latestUserMsg);
+
                             }
 
                             // generally do nothing here. We transition to waiting for generation
