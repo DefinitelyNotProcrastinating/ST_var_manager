@@ -369,7 +369,13 @@
             const lastAIMessage = SillyTavern.chat[index];
             if (!lastAIMessage || lastAIMessage.is_user) return;
             
-            const state = await getVariables();
+            var state = await getVariables();
+            
+            // state now loads from SAM_data and whatever we get will be written to SAM_data
+            if (state){
+                state = state.SAM_data; 
+            }
+
             const promotedCommands = await processVolatileUpdates(state);
             const messageContent = lastAIMessage.mes;
 
@@ -385,7 +391,9 @@
             
             const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state); 
             
-            await replaceVariables(goodCopy(newState));
+            //await replaceVariables(goodCopy(newState));
+            await insertOrAssignVariables({"SAM_data": goodCopy(newState)});
+
             
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
             const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
@@ -413,12 +421,17 @@
             
             if (state) {
                 console.log(`[SAM] replacing variables with found state at index ${index}`);
-                await replaceVariables(goodCopy(state));
+                //await replaceVariables(goodCopy(state));
+                await insertOrAssignVariables({"SAM_data": goodCopy(state)});
+
+                
             } else {
                 console.log("[SAM] did not find valid state at index, replacing with latest state")
                 const chatHistory = SillyTavern.chat;
                 const lastKnownState = await findLatestState(chatHistory, index);
-                await replaceVariables(goodCopy(lastKnownState));
+                //await replaceVariables(goodCopy(lastKnownState));
+                await insertOrAssignVariables({"SAM_data":goodCopy(lastKnownState)});
+
             }
 
         } catch (e) {
@@ -587,7 +600,7 @@
         // when received, push one event out. then re-invoke if there is still thing in the queue.
         console.log(`[SAM] [Unified event handler] pushing next EVENT [${event}] to queue and invoking executor [UDE].`);
         event_queue.push({event_id: event, args: [...args]});
-        unified_dispatch_executor(); // Kick off the processor, which will only run if not already running.
+        unified_dispatch_executor(); // Kick off the processor, which will only run if not already running. Todo: SHOULD THIS BE AWAITED?
     }
 
 
@@ -654,7 +667,65 @@
             handleGenerationStopped : async () => {
 
                 await unifiedEventHandler(tavern_events.GENERATION_STOPPED)
+            },
+
+
+            handleCleanup : async () => {
+                // directly define this function to handle cleanup.
+                // this will clean up existing SAM listeners, including itself.
+                // first await a short time
+                
+
+                // get lorebook entry.
+                console.log("[SAM] [Cleanup crew] Trying to determine if this is a SAM card.");
+                var char_lorebook = await getCharLorebooks();
+
+                if (!char_lorebook){
+                    return;
+                }
+
+                var entries = await getLorebookEntries(char_lorebook.primary);
+                if (!entries){
+                    return;
+                }
+
+                var found_ID = false;
+
+                for(let entry of entries){
+                    if (!entry.comment){
+                        continue;
+                    }
+                    
+
+                    if (entry.comment.trim().toLowerCase() === "SAM_IDENTIFIER".toLowerCase()){
+                        found_ID = true;
+                    }
+                }
+
+                // execution part. Test first
+                if (found_ID) {
+                    console.log("[SAM] [Cleanup crew] Identified SAM card. Cleanup crew will not clean its SAM listeners");
+                }else{
+                    console.log("[SAM] [Cleanup crew] Identified NON-SAM card. Cleanup crew will clean all Listeners.");
+                    // first wait for 1.5s for slow updates
+                    eventRemoveListener(handlers.handleChatChanged);
+                    eventRemoveListener(handlers.handleCleanup);
+                    eventRemoveListener(handlers.handleGenerationEnded);
+                    eventRemoveListener(handlers.handleGenerationStarted);
+                    eventRemoveListener(handlers.handleGenerationStopped);
+                    eventRemoveListener(handlers.handleMessageDeleted);
+                    eventRemoveListener(handlers.handleMessageEdited);
+                    eventRemoveListener(handlers.handleMessageSent);
+                    eventRemoveListener(handlers.handleMessageSwiped);
+
+
+                }
+
+
+
+
             }
+
         };
 
     $(() => {
@@ -662,6 +733,8 @@
 
         // Step 1: Clean up any listeners from a previous version of the script.
         // This is crucial to prevent "ghost" listeners that cause events to fire multiple times.
+
+        // - Did not work, still suffers from multiple listener and script unload but listener still working
         cleanupPreviousInstance();
 
         // Step 2: Define a standalone initialization function for the first load.
@@ -675,7 +748,12 @@
             const lastAiIndex = await findLastAiMessageAndIndex();
             if (lastAiIndex === -1) {
                 console.log(`[${SCRIPT_NAME}] No AI messages found. Initializing with default state.`);
-                await replaceVariables(_.cloneDeep(INITIAL_STATE));
+
+                // all replace variables should be insert or assign variables to SAM_data
+                // in turns, all reads should be from SAM_data
+                await insertOrAssignVariables({"SAM_data": _.cloneDeep(INITIAL_STATE)});
+
+                //await replaceVariables(_.cloneDeep(INITIAL_STATE));
             } else {
                 await loadStateFromMessage(lastAiIndex);
             }
@@ -697,6 +775,7 @@
         eventOn(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
         eventOn(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
         eventOn(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
+        eventOn(tavern_events.CHAT_CHANGED, handlers.handleCleanup);
 
         // Step 4: Store a reference to the new handlers on the window object.
         // This allows the *next* script reload to find and clean up this instance.
@@ -711,4 +790,4 @@
         }
     });
 
-})();
+})()
