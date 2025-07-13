@@ -309,15 +309,22 @@
                     }
                     case 'DEL': {
                         const [listPath, indexStr] = params;
+                        
                         if (!listPath || indexStr === undefined) continue;
+                        
                         const index = parseInt(indexStr, 10);
+                        
                         if (isNaN(index)) continue;
+                        
                         const list = _.get(state.static, listPath);
+
                         if (!Array.isArray(list)) continue;
+                        
                         if (index >= 0 && index < list.length) {
                             list[index] = undefined;
                             modifiedListPaths.add(listPath);
                         }
+                        
                         break;
                     }
                     case 'REMOVE': {
@@ -392,7 +399,11 @@
             const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state); 
             
             //await replaceVariables(goodCopy(newState));
-            await insertOrAssignVariables({"SAM_data": goodCopy(newState)});
+
+            var current_vars = await getVariables();
+            current_vars.SAM_data = goodCopy(newState);
+            await replaceVariables(current_vars);
+
 
             
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
@@ -422,15 +433,18 @@
             if (state) {
                 console.log(`[SAM] replacing variables with found state at index ${index}`);
                 //await replaceVariables(goodCopy(state));
-                await insertOrAssignVariables({"SAM_data": goodCopy(state)});
-
+                var vars = await getVariables()
+                vars.SAM_data = goodCopy(state);
+                await replaceVariables(vars);
                 
             } else {
                 console.log("[SAM] did not find valid state at index, replacing with latest state")
                 const chatHistory = SillyTavern.chat;
                 const lastKnownState = await findLatestState(chatHistory, index);
                 //await replaceVariables(goodCopy(lastKnownState));
-                await insertOrAssignVariables({"SAM_data":goodCopy(lastKnownState)});
+                var vars = await getVariables()
+                vars.SAM_data = goodCopy(lastKnownState);
+                await replaceVariables(vars);
 
             }
 
@@ -751,7 +765,9 @@
 
                 // all replace variables should be insert or assign variables to SAM_data
                 // in turns, all reads should be from SAM_data
-                await insertOrAssignVariables({"SAM_data": _.cloneDeep(INITIAL_STATE)});
+                var vars = await getVariables();
+                vars.SAM_data = _.cloneDeep(INITIAL_STATE)
+                await replaceVariables(vars);
 
                 //await replaceVariables(_.cloneDeep(INITIAL_STATE));
             } else {
