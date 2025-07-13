@@ -399,10 +399,7 @@
             const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state); 
             
             //await replaceVariables(goodCopy(newState));
-
-            var current_vars = await getVariables();
-            current_vars.SAM_data = goodCopy(newState);
-            await replaceVariables(current_vars);
+            await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(newState));return variables});
 
 
             
@@ -433,18 +430,15 @@
             if (state) {
                 console.log(`[SAM] replacing variables with found state at index ${index}`);
                 //await replaceVariables(goodCopy(state));
-                var vars = await getVariables()
-                vars.SAM_data = goodCopy(state);
-                await replaceVariables(vars);
+                await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(state));return variables});
                 
             } else {
                 console.log("[SAM] did not find valid state at index, replacing with latest state")
                 const chatHistory = SillyTavern.chat;
                 const lastKnownState = await findLatestState(chatHistory, index);
                 //await replaceVariables(goodCopy(lastKnownState));
-                var vars = await getVariables()
-                vars.SAM_data = goodCopy(lastKnownState);
-                await replaceVariables(vars);
+                await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(lastKnownState));return variables});
+
 
             }
 
@@ -765,9 +759,8 @@
 
                 // all replace variables should be insert or assign variables to SAM_data
                 // in turns, all reads should be from SAM_data
-                var vars = await getVariables();
-                vars.SAM_data = _.cloneDeep(INITIAL_STATE)
-                await replaceVariables(vars);
+                await updateVariablesWith(variables => {_.set(variables, "SAM_data", _.cloneDeep(INITIAL_STATE));return variables});
+
 
                 //await replaceVariables(_.cloneDeep(INITIAL_STATE));
             } else {
