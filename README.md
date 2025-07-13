@@ -1,4 +1,4 @@
-# 情景感知管理器 (Situational Awareness Manager - SAM) 
+# 态势感知管理器 (Situational Awareness Manager - SAM) 
 
 **一个为 SillyTavern 设计的强大状态管理扩展。**
 
