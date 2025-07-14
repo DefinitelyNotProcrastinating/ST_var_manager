@@ -10,6 +10,14 @@
 // == It also includes a sandboxed EVAL command for user-defined functions.
 // ==
 // ============================================================================
+// ****************************
+// Required plugins: JS-slash-runner by n0vi028
+// ****************************
+
+// bug : "fake-swipe" -> it does not actually reset the state.
+// upon swipe, it first sends THEN reloads the state...
+// somehow fixed?
+
 
 (function () {
     // --- CONFIGURATION ---
@@ -31,7 +39,6 @@
 
     const STATES = {
         IDLE: "IDLE",
-        AWAIT_REGENERATION: "AWAIT_REGENERATION",
         AWAIT_GENERATION: "AWAIT_GENERATION",
         PROCESSING: "PROCESSING"
     };
@@ -50,7 +57,7 @@
     // This key is used to store our event handlers on the global window object.
     // This allows a new instance of the script to find and remove the listeners
     // from an old instance, preventing the "multiple listener" bug on script reloads.
-    const HANDLER_STORAGE_KEY = `__SAM_V2.4.1_EVENT_HANDLERS__`;
+    const HANDLER_STORAGE_KEY = `__SAM_V3_EVENT_HANDLERS__`;
 
     // This function is called by a new script instance to remove listeners
     // from a previously loaded instance.
@@ -207,6 +214,12 @@
 
 
     // --- CORE LOGIC ---
+    // Todo: Process volatile updates for all the operations.
+    // this includes SET, REMOVE, DEL,... 
+    // TIMED syntax will change to <TIMED :: is_game_time? :: time :: reason :: [actual command]>
+    // to increase the flexibility of the TIMED command.
+    // you can even TIMED another TIMED because of this.
+    // to do this, you must make time a level 1 variable in your static.
     async function processVolatileUpdates(state) {
         if (!state.volatile || !state.volatile.length) return [];
         const promotedCommands = [];
@@ -215,7 +228,10 @@
         const deleted = [];
 
         const currentRound = await getRoundCounter();
-        const currentTime = new Date();
+        var currentTime = state.time;
+        if (!currentTime){
+            currentTime = new Date();
+        }
         for (const volatile of state.volatile) {
             const [varName, varValue, isGameTime, targetTime] = volatile;
             let triggered = isGameTime ? (new Date(String(currentTime)) >= new Date(targetTime)) : (currentRound >= targetTime);
@@ -284,13 +300,21 @@
                         break;
                     }
                     case 'TIMED_SET': {
+
                         const [varName, varValue, reason, isGameTimeStr, timeUnitsStr] = params;
+                        
                         if (!varName || !varValue || !reason || !isGameTimeStr || !timeUnitsStr) continue;
+                        
                         const isGameTime = isGameTimeStr.toLowerCase() === 'true' || isGameTimeStr === 1;
+                        
                         const finalValue = isNaN(varValue) ? tryParseJSON(varValue) : Number(varValue);
+                        
                         const targetTime = isGameTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
+                        
                         if(!state.volatile) state.volatile = [];
+                        
                         state.volatile.push([varName, finalValue, isGameTime, targetTime, reason]);
+                        
                         break;
                     }
                     case 'CANCEL_SET': {
@@ -471,17 +495,6 @@
     // actually a mealy machine. State updates and processing happens in same cycle.
     async function dispatcher(event, ...event_params){
 
-        // this log triggers ERRORS!
-        /*
-        console.log(
-        `[SAM] [FSM Dispatcher] FSM Dispatcher called from event ${event} with params ${JSON.stringify(event_params)}.
-        stats: 
-        Dispatcher invoked at time = ${Date()}
-        Current chat length = ${SillyTavern?.chat?.length}
-        Current swipe ID = ${SillyTavern.chat[SillyTavern?.chat?.length -1].swipe_id}
-        Total swipe ID = ${SillyTavern?.chat[SillyTavern.chat.length -1]?.swipes.length}
-        `);
-        */
         console.log(
         `[SAM] [FSM Dispatcher] FSM Dispatcher called from event ${event} with params ${JSON.stringify(event_params)}.
         stats: 
@@ -608,7 +621,7 @@
         // when received, push one event out. then re-invoke if there is still thing in the queue.
         console.log(`[SAM] [Unified event handler] pushing next EVENT [${event}] to queue and invoking executor [UDE].`);
         event_queue.push({event_id: event, args: [...args]});
-        unified_dispatch_executor(); // Kick off the processor, which will only run if not already running. Todo: SHOULD THIS BE AWAITED?
+        await unified_dispatch_executor(); // Kick off the processor, which will only run if not already running. Todo: SHOULD THIS BE AWAITED?
     }
 
 
