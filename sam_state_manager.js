@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.0.0 (FSM)
+// == Version: 3.0.0 
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -16,7 +16,11 @@
 
 // bug : "fake-swipe" -> it does not actually reset the state.
 // upon swipe, it first sends THEN reloads the state...
-// somehow fixed?
+// therefore we must restructure it into a "real-swipe".
+
+// The idea is to refactor it to:
+// State N = State N-1 + Delta_state N
+// Then, upon load, we compute 
 
 
 (function () {
@@ -570,12 +574,11 @@
 
                     switch (event){
 
-                        case tavern_events.GENERATION_STOPPED:
+                        case tavern_events.GENERATION_STOPPED:                        
                         case tavern_events.GENERATION_ENDED: {
                             curr_state = STATES.PROCESSING;
 
                             console.log("[SAM] [AWAIT_GENERATION handler] Deciphering latest message");
-                            await new Promise(resolve => setTimeout(resolve, 500));
                             const index = SillyTavern.chat.length - 1;
                             await processMessageState(index);
 
@@ -642,7 +645,7 @@
                 await dispatcher(event_id, ...args);
             } catch (error) {
                 console.error(`[SAM] [Unified Event Executor] Unhandled error during dispatch of ${event_id}:`, error);
-                currentState = STATES.IDLE; // Failsafe reset
+                curr_state = STATES.IDLE; // Failsafe reset
             }
         }
 
@@ -689,8 +692,7 @@
 
                 await unifiedEventHandler(tavern_events.GENERATION_STOPPED)
             },
-
-
+            
             handleCleanup : async () => {
                 // directly define this function to handle cleanup.
                 // this will clean up existing SAM listeners, including itself.
@@ -738,6 +740,7 @@
                     eventRemoveListener(handlers.handleMessageEdited);
                     eventRemoveListener(handlers.handleMessageSent);
                     eventRemoveListener(handlers.handleMessageSwiped);
+                    
 
 
                 }
@@ -805,7 +808,7 @@
         
         // Step 5: Initialize the state for the newly loaded chat.
         try {
-            console.log(`[${SCRIPT_NAME}] V3.0.0 (FSM) loaded. GLHF, player.`);
+            console.log(`[${SCRIPT_NAME}] V3.0.0 loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] Error during final initialization:`, error);
