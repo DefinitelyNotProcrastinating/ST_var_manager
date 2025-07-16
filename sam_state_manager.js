@@ -14,14 +14,6 @@
 // Required plugins: JS-slash-runner by n0vi028
 // ****************************
 
-// bug : "fake-swipe" -> it does not actually reset the state.
-// upon swipe, it first sends THEN reloads the state...
-// therefore we must restructure it into a "real-swipe".
-
-// The idea is to refactor it to:
-// State N = State N-1 + Delta_state N
-// Then, upon load, we compute 
-
 
 (function () {
     // --- CONFIGURATION ---
