@@ -45,7 +45,10 @@
     // do a queue-based event handler.
     const event_queue = [];
 
-
+    // defensive programming against SillyTavern ignoring event sends
+    let generationWatcherId = null;
+    const WATCHER_INTERVAL_MS = 3000; // Check every 3 seconds
+    const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
 
 
 
@@ -97,6 +100,55 @@
     /* ... (rest of documentation) ... */
 
     // --- HELPER FUNCTIONS ---
+
+    // This helper function stops the watcher and cleans up its ID
+    function stopGenerationWatcher() {
+        if (generationWatcherId) {
+            console.log('[SAM Watcher] Stopping generation watcher.');
+            clearInterval(generationWatcherId);
+            generationWatcherId = null;
+        }
+    }
+
+    // This function starts the watcher
+    function startGenerationWatcher() {
+        // Stop any previous watcher just in case.
+        stopGenerationWatcher();
+
+        console.log(`[SAM] [Await watcher] Starting generation watcher. Will check UI every ${WATCHER_INTERVAL_MS / 1000}s.`);
+        generationWatcherId = setInterval(() => {
+            // This is the core logic of our janitor process
+            console.log('[SAM] [Await watcher] Performing check...');
+
+            // Check if the "Stop" button is visible.
+            // This is our new, reliable source of truth.
+            const isUiGenerating = $('#mes_stop').is(':visible'); // false when not generating, true when generating
+
+            // Condition for intervention: FSM is stuck waiting, but the UI says generation is over.
+            if (curr_state === STATES.AWAIT_GENERATION && !isUiGenerating) {
+                console.warn('[SAM] [Await watcher] DETECTED DESYNC! FSM is in AWAIT_GENERATION, but ST is not generating. Forcing state transition.');
+                
+                // Stop ourselves from running again.
+                stopGenerationWatcher();
+                
+                // Push our special event into the queue to force processing.
+                // Using the unifiedEventHandler ensures we respect the queue and dispatch lock.
+                unifiedEventHandler(FORCE_PROCESS_COMPLETION);
+
+            } else if (curr_state !== STATES.AWAIT_GENERATION) {
+                // Failsafe: If the FSM is not in the await state for any reason,
+                // the watcher's job is done.
+                console.log('[SAM Watcher] FSM is no longer awaiting generation. Shutting down watcher.');
+                stopGenerationWatcher();
+            }
+
+        }, WATCHER_INTERVAL_MS);
+    }
+
+
+
+
+
     async function getRoundCounter(){
         return SillyTavern.chat.length -1;
     }
@@ -527,6 +579,7 @@
 
                             // generally do nothing here. We transition to waiting for generation
                             curr_state = STATES.AWAIT_GENERATION;
+                            startGenerationWatcher();
 
                             break;
                         }
@@ -566,8 +619,11 @@
 
                     switch (event){
 
-                        case tavern_events.GENERATION_STOPPED:                        
+                        case tavern_events.GENERATION_STOPPED:     
+                        case FORCE_PROCESS_COMPLETION:     
                         case tavern_events.GENERATION_ENDED: {
+
+                            stopGenerationWatcher();
                             curr_state = STATES.PROCESSING;
 
                             console.log("[SAM] [AWAIT_GENERATION handler] Deciphering latest message");
@@ -580,6 +636,7 @@
                             break;
                         }
                         case tavern_events.CHAT_CHANGED: {
+                            stopGenerationWatcher();
                             console.log('[SAM] [AWAIT_GENERATION handler] Chat changed during generation. Aborting and returning to IDLE.');
                             await sync_latest_state();
                             curr_state = STATES.IDLE;
@@ -599,6 +656,7 @@
 
 
         }catch(e){
+            stopGenerationWatcher();
             console.log(`[SAM] [Dispatcher] FSM Scheduling failed. Error reason: ${e}`);
         }
     }
