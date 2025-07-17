@@ -57,6 +57,9 @@
     // This allows a new instance of the script to find and remove the listeners
     // from an old instance, preventing the "multiple listener" bug on script reloads.
     const HANDLER_STORAGE_KEY = `__SAM_V3_EVENT_HANDLERS__`;
+    const SESSION_STORAGE_KEY = "__SAM_ID__";
+    var session_id = "";
+
 
     // This function is called by a new script instance to remove listeners
     // from a previously loaded instance.
@@ -670,6 +673,15 @@
     let isDispatching = false;
 
     async function unifiedEventHandler(event, ...args) {
+
+        // guard for multiple triggering
+        if (session_id !== sessionStorage.getItem(SESSION_STORAGE_KEY)){
+            console.warn(
+            `[SAM] Session mismatch detected! current session key == ${session_id} while got session key ${sessionStorage.getItem(SESSION_STORAGE_KEY)}.
+            Aborting event sequence for event ${JSON.stringify(event)}`);
+            return;
+        }
+        
         // move on to event queue-based handling to not miss a single generation_stopped or something like that.
         // when received, push one event out. then re-invoke if there is still thing in the queue.
         console.log(`[SAM] [Unified event handler] pushing next EVENT [${event}] to queue and invoking executor [UDE].`);
@@ -714,10 +726,15 @@
             },
             handleGenerationEnded: async () => {
 
+
+
                 await unifiedEventHandler(tavern_events.GENERATION_ENDED)
             
             },
             handleMessageSwiped: async () => {
+
+                //console.log(`[SAM] test: ${JSON.stringify(session_id)} == ${JSON.stringify(sessionStorage.getItem(SESSION_STORAGE_KEY))} `);
+
 
                 await unifiedEventHandler(tavern_events.MESSAGE_SWIPED)
             
@@ -739,6 +756,7 @@
                 await unifiedEventHandler(tavern_events.MESSAGE_SENT)
             },
             handleGenerationStopped : async () => {
+
 
                 await unifiedEventHandler(tavern_events.GENERATION_STOPPED)
             },
@@ -860,6 +878,10 @@
         try {
             console.log(`[${SCRIPT_NAME}] V3.0.0 loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
+            session_id = JSON.stringify(new Date());
+            sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
+            console.log(`[SAM] Assigned new session ID: ${session_id}` );
+
         } catch (error) {
             console.error(`[${SCRIPT_NAME}] Error during final initialization:`, error);
         }
