@@ -23,8 +23,8 @@
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
 
-    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>.*?)>/gs;
-    const INITIAL_STATE = { static: {}, volatile: [], responseSummary: [], func: [] };
+    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>.*?)>/gs;
+    const INITIAL_STATE = { static: {}, time: "",volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
 
     // impossible to see ended -> ended -> ended -> ended.....
@@ -174,7 +174,8 @@
                     static: parsed.static ?? {},
                     volatile: parsed.volatile ?? [],
                     responseSummary: parsed.responseSummary ?? [],
-                    func: parsed.func ?? []
+                    func: parsed.func ?? [],
+                    time: parsed.time ?? ""
                 };
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Failed to parse state JSON.`, error);
@@ -347,6 +348,12 @@
                         }
                         if (!state.responseSummary.includes(command.params.trim())){
                            state.responseSummary.push(command.params.trim());
+                        }
+                        break;
+                    }
+                    case "TIME" : {
+                        if (state.time) {
+                            state.time = command.params.trim();
                         }
                         break;
                     }
