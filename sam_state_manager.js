@@ -121,7 +121,7 @@
         console.log(`[SAM] [Await watcher] Starting generation watcher. Will check UI every ${WATCHER_INTERVAL_MS / 1000}s.`);
         generationWatcherId = setInterval(() => {
             // This is the core logic of our janitor process
-            console.log('[SAM] [Await watcher] Performing check...');
+            //console.log('[SAM] [Await watcher] Performing check...');
 
             // Check if the "Stop" button is visible.
             // This is our new, reliable source of truth.
@@ -868,7 +868,6 @@
         eventOn(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
         eventOn(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
         eventOn(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
-        eventOn(tavern_events.CHAT_CHANGED, handlers.handleCleanup);
 
         // Step 4: Store a reference to the new handlers on the window object.
         // This allows the *next* script reload to find and clean up this instance.
