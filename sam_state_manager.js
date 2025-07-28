@@ -579,10 +579,10 @@
                             }
 
 
-                            if (event_params[0] === "swipe" ){
+                            if (event_params[0] === "swipe" || event_params[0] === "regenerate" ){
 
-                                console.log("[SAM] [IDLE handler] Swipe generate to GENERATE during IDLE detected. Loading from before latest user msg.");
-                                const latestUserMsg = await findLatestUserMsgIndex();
+                                console.log(`[SAM] [IDLE handler] ${event_params[0]} detected. RE/GENERATE during IDLE detected. Loading from before latest user msg.`);
+                                const latestUserMsg = findLatestUserMsgIndex();
                                 await loadStateFromMessage(latestUserMsg);
 
                             }
