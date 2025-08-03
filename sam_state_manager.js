@@ -441,7 +441,7 @@
                     case 'EVAL': {
                         const [funcName, ...funcParams] = params;
 
-                        var param_list = [funcParams];
+                        var param_list = funcParams;
                         for (let i = 0; i < param_list.length; i++) {
                             param_list[i] = smart_parse(param_list[i]);
                         }
