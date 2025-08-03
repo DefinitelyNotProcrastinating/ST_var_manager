@@ -23,7 +23,7 @@
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
 
-    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|REMOVE|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>.*?)>/gs;
+    const COMMAND_REGEX = /<(?<type>SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>.*?)>/gs;
     const INITIAL_STATE = { static: {}, time: "",volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
 
@@ -463,12 +463,80 @@
                         
                         break;
                     }
-                    case 'REMOVE': {
+                    case 'SELECT_DEL': {
                         const [listPath, identifier, targetId] = params;
                         if (!listPath || !identifier || targetId === undefined) continue;
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) continue;
                         _.set(state.static, listPath, _.reject(list, {[identifier]: tryParseJSON(targetId)}));
+                        break;
+                    }
+
+                    case 'SELECT_ADD' : {
+                        // <SELECT_ADD :: parent_list :: selector_property :: selector_value :: receiver_property :: value_to_add>
+                        const [listPath, selectorProp, selectorVal, receiverProp, valueToAdd] = params;
+                        if (!listPath || !selectorProp || selectorVal === undefined || !receiverProp || valueToAdd === undefined) {
+                            console.warn(`[SAM] SELECT_ADD aborted: Missing parameters. Got: ${params.join(' :: ')}`);
+                            continue;
+                        }
+                    
+                        const list = _.get(state.static, listPath);
+                        if (!Array.isArray(list)) {
+                            console.warn(`[SAM] SELECT_ADD aborted: Path '${listPath}' does not resolve to an array.`);
+                            continue;
+                        }
+                    
+                        const parsedSelectorVal = smart_parse(selectorVal);
+                        const targetObject = _.find(list, { [selectorProp]: parsedSelectorVal });
+                    
+                        if (!targetObject) {
+                            console.warn(`[SAM] SELECT_ADD: Could not find object in '${listPath}' where '${selectorProp}' is '${parsedSelectorVal}'.`);
+                            continue;
+                        }
+                    
+                        const parsedValueToAdd = smart_parse(valueToAdd);
+                        const existingValue = _.get(targetObject, receiverProp);
+                    
+                        if (Array.isArray(existingValue)) {
+                            existingValue.push(parsedValueToAdd);
+                            // The object is modified by reference, so no need for an explicit set,
+                            // but we use it for consistency and to create the property if it's null/undefined.
+                            _.set(targetObject, receiverProp, existingValue);
+                        } else {
+                            const baseValue = Number(existingValue) || 0;
+                            const increment = Number(parsedValueToAdd);
+                            if (isNaN(baseValue) || isNaN(increment)) {
+                                 console.warn(`[SAM] SELECT_ADD: Cannot perform numeric addition on non-numeric values for property '${receiverProp}'. Current: '${existingValue}', Add: '${parsedValueToAdd}'`);
+                                 continue;
+                            }
+                            _.set(targetObject, receiverProp, baseValue + increment);
+                        }
+                        break;
+                    }
+                    case 'SELECT_SET' : {
+                        // <SELECT_SET :: parent_list :: selector_property :: selector_value :: receiver_property:: value_to_set>
+                        const [listPath, selectorProp, selectorVal, receiverProp, valueToSet] = params;
+                        if (!listPath || !selectorProp || selectorVal === undefined || !receiverProp || valueToSet === undefined) {
+                            console.warn(`[SAM] SELECT_SET aborted: Missing parameters. Got: ${params.join(' :: ')}`);
+                            continue;
+                        }
+
+                        const list = _.get(state.static, listPath);
+                        if (!Array.isArray(list)) {
+                            console.warn(`[SAM] SELECT_SET aborted: Path '${listPath}' does not resolve to an array.`);
+                            continue;
+                        }
+
+                        const parsedSelectorVal = smart_parse(selectorVal);
+                        const targetObject = _.find(list, { [selectorProp]: parsedSelectorVal });
+
+                        if (!targetObject) {
+                            console.warn(`[SAM] SELECT_SET: Could not find object in '${listPath}' where '${selectorProp}' is '${parsedSelectorVal}'.`);
+                            continue;
+                        }
+
+                        const parsedValueToSet = smart_parse(valueToSet);
+                        _.set(targetObject, receiverProp, parsedValueToSet);
                         break;
                     }
                     case 'EVAL': {
@@ -939,7 +1007,7 @@
         
         // Step 5: Initialize the state for the newly loaded chat.
         try {
-            console.log(`[${SCRIPT_NAME}] V3 loaded. GLHF, player.`);
+            console.log(`[${SCRIPT_NAME}] V3.0.0 loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
