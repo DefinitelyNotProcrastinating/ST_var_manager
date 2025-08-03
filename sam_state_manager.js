@@ -246,10 +246,31 @@
                 const argNames = ['state', '_', 'fetch', 'XMLHttpRequest', ...paramNames];
                 const argValues = [state, _, fetchImpl, xhrImpl, ...params];
 
+
+                /*
                 const functionBody = `'use strict';\n${funcDef.func_body}`;
                 const userFunction = new Function(...argNames, functionBody);
 
                 const result = await userFunction.apply(null, argValues);
+                resolve(result);
+                */
+
+                const wrapperBody = `
+                'use strict';
+                
+                // The 'arguments' object here will contain all the values passed to the wrapper.
+                // We are creating the user's function and immediately calling it with those arguments.
+
+                const userFunction = new Function(${argNames.map(name => `'${name}'`).join(',')}, \`${funcDef.func_body}\`);
+                return userFunction.apply(null, arguments);
+                `;
+
+                // Create the sandboxed wrapper. It takes no named parameters itself.
+                const sandboxedWrapper = new Function(wrapperBody);
+
+                // Execute the wrapper, passing our real values to it.
+                const result = await sandboxedWrapper.apply(null, argValues);
+                
                 resolve(result);
 
             } catch (error) {
