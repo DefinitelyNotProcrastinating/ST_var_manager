@@ -441,10 +441,8 @@
                     case 'EVAL': {
                         const [funcName, ...funcParams] = params;
 
-                        var param_list = funcParams;
-                        for (let i = 0; i < param_list.length; i++) {
-                            param_list[i] = smart_parse(param_list[i]);
-                        }
+                        const processedParams = funcParams.map(param => smart_parse(param));
+
 
                         // must detect src if src is a list. We might use JSON parse as list.
 
@@ -452,7 +450,7 @@
                             console.warn(`[${SCRIPT_NAME}] EVAL aborted: EVAL command requires a function name.`);
                             continue;
                         }
-                        await runSandboxedFunction(funcName, param_list, state);
+                        await runSandboxedFunction(funcName, processedParams, state);
                         break;
                     }
                 }
