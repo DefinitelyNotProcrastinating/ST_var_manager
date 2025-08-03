@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.0.0 
+// == Version: 3.0.1
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -100,7 +100,14 @@
     // Syntax:       <EVAL :: function_name :: param1 :: param2 :: ...>
     // WARNING: DANGEROUS FUNCTIONALITY. KNOW WHAT YOU ARE DOING, I WILL NOT TAKE RESPONSIBILITY FOR YOUR FAILURES AS STATED IN LICENSE.
     // YOU HAVE BEEN WARNED.
-    /* ... (rest of documentation) ... */
+    // EVAL logic:
+    // a function object:
+    // func[x] -> {}
+    // func[x].func_name
+    // func[x].func_params
+    // func[x].timeout
+    // func[x].network_access
+    // func[x].period - manages periodicity.
 
     // --- HELPER FUNCTIONS ---
 
@@ -202,9 +209,6 @@
     }
 
 
-    // not going to be used anymore when we have swipe length detection. 
-    // it does not accurately detect swipes to unknown space. We need to detect swipes to non-existent previous indices
-    // to know that we're swiping to generate a new response. 
     function findLatestUserMsgIndex(){
         for (let i = SillyTavern.chat.length -1; i >= 0; i--){
             const message = SillyTavern.chat[i];
@@ -222,6 +226,7 @@
     // --- Sandboxed function executor
     async function runSandboxedFunction(funcName, params, state) {
         const funcDef = state.func?.find(f => f.func_name === funcName);
+
 
         if (!funcDef) {
             console.warn(`[${SCRIPT_NAME}] EVAL: Function '${funcName}' not found in state.func array.`);
@@ -300,6 +305,22 @@
         }
         state.volatile = remainingVolatiles;
         return promotedCommands;
+    }
+
+    function smart_parse(value){
+
+        if (typeof value !== 'string') {
+            return value;
+        }
+
+        try {
+            // Attempt to parse the string as JSON.
+            return JSON.parse(value);
+        } catch (e) {
+            // If parsing fails, it's not a JSON string.
+            // Return the original string.
+            return value;
+        }
     }
 
     async function applyCommandsToState(commands, state) {
@@ -419,11 +440,19 @@
                     }
                     case 'EVAL': {
                         const [funcName, ...funcParams] = params;
+
+                        var param_list = [funcParams];
+                        for (let i = 0; i < param_list.length; i++) {
+                            param_list[i] = smart_parse(param_list[i]);
+                        }
+
+                        // must detect src if src is a list. We might use JSON parse as list.
+
                         if (!funcName) {
                             console.warn(`[${SCRIPT_NAME}] EVAL aborted: EVAL command requires a function name.`);
                             continue;
                         }
-                        await runSandboxedFunction(funcName, funcParams, state);
+                        await runSandboxedFunction(funcName, param_list, state);
                         break;
                     }
                 }
@@ -682,7 +711,7 @@
     async function unifiedEventHandler(event, ...args) {
 
         // guard for multiple triggering
-        if (session_id !== sessionStorage.getItem(SESSION_STORAGE_KEY)){
+        if ((sessionStorage.getItem(SESSION_STORAGE_KEY)) && (session_id !== sessionStorage.getItem(SESSION_STORAGE_KEY))){
             console.warn(
             `[SAM] Session mismatch detected! current session key == ${session_id} while got session key ${sessionStorage.getItem(SESSION_STORAGE_KEY)}.
             Aborting event sequence for event ${JSON.stringify(event)}`);
@@ -739,9 +768,6 @@
             
             },
             handleMessageSwiped: async () => {
-
-                //console.log(`[SAM] test: ${JSON.stringify(session_id)} == ${JSON.stringify(sessionStorage.getItem(SESSION_STORAGE_KEY))} `);
-
 
                 await unifiedEventHandler(tavern_events.MESSAGE_SWIPED)
             
