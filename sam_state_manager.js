@@ -235,7 +235,31 @@
 
         const timeout = funcDef.timeout ?? 2000;
         const allowNetwork = funcDef.network_access === true;
-        const paramNames = funcDef.func_params || [];
+        const rawParamNames = funcDef.func_params || [];
+
+
+        let formalParamNames = [];
+        let restParamName = null;
+
+        for (const param of rawParamNames) {
+            if (param.startsWith('...')) {
+                // This is our rest parameter. Store its name without the '...'.
+                restParamName = param.substring(3);
+            } else {
+                // This is a normal, formal parameter.
+                formalParamNames.push(param);
+            }
+        }
+
+        let bodyPrologue = '';
+        if (restParamName) {
+            // If a rest parameter was defined, we inject code to create it from the 'arguments' object.
+            // We slice the arguments object starting after the last formal parameter.
+            const startIndex = formalParamNames.length;
+            // This line will become e.g.: `const skill_names = Array.from(arguments).slice(4);`
+            // The '4' comes from state, _, fetch, XMLHttpRequest.
+            bodyPrologue = `const ${restParamName} = Array.from(arguments).slice(${4 + startIndex});\n`;
+        }
 
         const executionPromise = new Promise(async (resolve, reject) => {
             try {
@@ -243,33 +267,21 @@
                 const fetchImpl = allowNetwork ? window.fetch.bind(window) : networkBlocker;
                 const xhrImpl = allowNetwork ? window.XMLHttpRequest : networkBlocker;
 
-                const argNames = ['state', '_', 'fetch', 'XMLHttpRequest', ...paramNames];
+                // These are the names of all parameters the new function will accept.
+                // Notice we are ONLY using the formal (non-rest) parameter names here.
+                const argNames = ['state', '_', 'fetch', 'XMLHttpRequest', ...formalParamNames];
+                
+                // These are the values we will pass when we call the function.
                 const argValues = [state, _, fetchImpl, xhrImpl, ...params];
 
+                // We assemble the final function body string.
+                const functionBody = `'use strict';\n${bodyPrologue}${funcDef.func_body}`;
 
-                /*
-                const functionBody = `'use strict';\n${funcDef.func_body}`;
+                // Create the function. This is now safe for strict mode.
                 const userFunction = new Function(...argNames, functionBody);
 
+                // Execute the function. `.apply` will correctly pass all our `argValues`.
                 const result = await userFunction.apply(null, argValues);
-                resolve(result);
-                */
-
-                const wrapperBody = `
-                'use strict';
-                
-                // The 'arguments' object here will contain all the values passed to the wrapper.
-                // We are creating the user's function and immediately calling it with those arguments.
-
-                const userFunction = new Function(${argNames.map(name => `'${name}'`).join(',')}, \`${funcDef.func_body}\`);
-                return userFunction.apply(null, arguments);
-                `;
-
-                // Create the sandboxed wrapper. It takes no named parameters itself.
-                const sandboxedWrapper = new Function(wrapperBody);
-
-                // Execute the wrapper, passing our real values to it.
-                const result = await sandboxedWrapper.apply(null, argValues);
                 
                 resolve(result);
 
@@ -927,7 +939,7 @@
         
         // Step 5: Initialize the state for the newly loaded chat.
         try {
-            console.log(`[${SCRIPT_NAME}] V3.0.0 loaded. GLHF, player.`);
+            console.log(`[${SCRIPT_NAME}] V3 loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
