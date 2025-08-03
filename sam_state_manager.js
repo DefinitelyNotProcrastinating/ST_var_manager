@@ -90,9 +90,11 @@
     // SET:          Sets a variable to a value. <SET :: path.to.var :: value>
     // ADD:          Adds a number to a variable, or an item to a list. <ADD :: path.to.var :: value>
     // DEL:          Deletes an item from a list by its numerical index. <DEL :: list_path :: index>
-    // REMOVE:       Removes item(s) from a list where a property matches a value. <REMOVE :: list_path :: property's relative path :: value>
     // TIMED_SET:    Schedules a SET command. <TIMED_SET :: path.to.var :: new_value :: reason :: is_real_time? :: timepoint>
     // CANCEL_SET:   Cancels a scheduled TIMED_SET. <CANCEL_SET :: index or reason>
+    // SELECT_ADD : ONLY add to the dict elem's property that matches the selector. <SELECT_ADD :: path.to.parent.list[dict] :: selector_param :: selector_value :: receiver_param :: receiver_value_to_add>
+    // SELECT_SET : ONLY sets the dict elem's property that matches the selector <SELECT_SET :: path.to.parent.list[dict] :: selector_param :: selector_value :: receiver_param :: receiver_value_to_set>
+    // SELECT_DEL : ONLY deletes the dict elem with a property equal to the selector <SELECT_DEL :: path.to.parent.list[dict] :: selector_param :: selector_value>
     // RESPONSE_SUMMARY: Adds a summary of the AI's response to a list. <RESPONSE_SUMMARY :: text>
     //
     // EVAL command documentation
