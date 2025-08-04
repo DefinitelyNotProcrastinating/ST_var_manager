@@ -488,7 +488,7 @@
                             continue;
                         }
                     
-                        const parsedSelectorVal = smart_parse(selectorVal);
+                        const parsedSelectorVal = tryParseJSON(selectorVal);
                         const targetObject = _.find(list, { [selectorProp]: parsedSelectorVal });
                     
                         if (!targetObject) {
@@ -496,25 +496,24 @@
                             continue;
                         }
                     
-                        const parsedValueToAdd = smart_parse(valueToAdd);
                         const existingValue = _.get(targetObject, receiverProp);
-                    
+
+                        // Logic now mirrors the main 'ADD' command
                         if (Array.isArray(existingValue)) {
-                            existingValue.push(parsedValueToAdd);
-                            // The object is modified by reference, so no need for an explicit set,
-                            // but we use it for consistency and to create the property if it's null/undefined.
+                            existingValue.push(tryParseJSON(valueToAdd));
                             _.set(targetObject, receiverProp, existingValue);
                         } else {
                             const baseValue = Number(existingValue) || 0;
-                            const increment = Number(parsedValueToAdd);
+                            const increment = Number(valueToAdd); // Directly convert the string param
                             if (isNaN(baseValue) || isNaN(increment)) {
-                                 console.warn(`[SAM] SELECT_ADD: Cannot perform numeric addition on non-numeric values for property '${receiverProp}'. Current: '${existingValue}', Add: '${parsedValueToAdd}'`);
+                                 console.warn(`[SAM] SELECT_ADD: Cannot perform numeric addition on non-numeric values for property '${receiverProp}'. Current: '${existingValue}', Add: '${valueToAdd}'`);
                                  continue;
                             }
                             _.set(targetObject, receiverProp, baseValue + increment);
                         }
                         break;
                     }
+
                     case 'SELECT_SET' : {
                         // <SELECT_SET :: parent_list :: selector_property :: selector_value :: receiver_property:: value_to_set>
                         const [listPath, selectorProp, selectorVal, receiverProp, valueToSet] = params;
@@ -529,7 +528,7 @@
                             continue;
                         }
 
-                        const parsedSelectorVal = smart_parse(selectorVal);
+                        const parsedSelectorVal = tryParseJSON(selectorVal);
                         const targetObject = _.find(list, { [selectorProp]: parsedSelectorVal });
 
                         if (!targetObject) {
@@ -537,10 +536,20 @@
                             continue;
                         }
 
-                        const parsedValueToSet = smart_parse(valueToSet);
-                        _.set(targetObject, receiverProp, parsedValueToSet);
+                        // Logic now mirrors the main 'SET' command for robust value parsing
+                        let valueToSetProcessed = tryParseJSON(valueToSet);
+                        if (typeof valueToSetProcessed === 'string') {
+                            const lowerVar = valueToSetProcessed.trim().toLowerCase();
+                            if (lowerVar === "true") valueToSetProcessed = true;
+                            else if (lowerVar === "false") valueToSetProcessed = false;
+                            else if (lowerVar === "null") valueToSetProcessed = null;
+                            else if (lowerVar === "undefined") valueToSetProcessed = undefined;
+                        }
+
+                        _.set(targetObject, receiverProp, isNaN(Number(valueToSetProcessed)) ? valueToSetProcessed : Number(valueToSetProcessed));
                         break;
                     }
+
                     case 'EVAL': {
                         const [funcName, ...funcParams] = params;
 
@@ -1009,7 +1018,7 @@
         
         // Step 5: Initialize the state for the newly loaded chat.
         try {
-            console.log(`[${SCRIPT_NAME}] V3.0.0 loaded. GLHF, player.`);
+            console.log(`[${SCRIPT_NAME}] V3.0.1 loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
