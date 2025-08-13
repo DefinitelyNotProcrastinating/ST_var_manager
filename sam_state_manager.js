@@ -190,7 +190,8 @@
                     volatile: parsed.volatile ?? [],
                     responseSummary: parsed.responseSummary ?? [],
                     func: parsed.func ?? [],
-                    time: parsed.time ?? ""
+                    time: parsed.time ?? "",
+                    dtime : parsed.dtime ?? 0
                 };
             } catch (error) {
                 console.error(`[${SCRIPT_NAME}] Failed to parse state JSON.`, error);
@@ -412,7 +413,9 @@
                     }
                     case "TIME" : {
                         if (state.time) {
+                            const prev_time = state.time;
                             state.time = command.params.trim();
+                            _.set(state, 'dtime', new Date(state.time) - new Date(prev_time));
                         }
                         break;
                     }
@@ -671,9 +674,11 @@
             
             // 3. Run all commands through the pipeline for ordering and execution.
             const newState = await executeCommandPipeline(allMessageCommands, state);
-            
+
+
             // 4. Update variables and the chat message.
             await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(newState));return variables});
+
 
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
             const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
