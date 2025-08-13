@@ -1,4 +1,4 @@
-# 态势感知管理器 (Situational Awareness Manager - SAM) v3.0.1
+# 态势感知管理器 (Situational Awareness Manager - SAM) v3.1.0
 
 **一个为 SillyTavern 设计的强大、可靠的状态管理扩展。**
 
@@ -13,7 +13,7 @@
 *   **命令驱动的状态更新**：AI 可以在其回复中嵌入简单的命令（如 `<SET::...>`）来动态修改状态，例如更新任务进度、改变 NPC 好感度或管理玩家库存。
 *   **复杂的嵌套数据结构**：支持完整的 JSON 对象作为状态，您可以轻松管理如 `player.inventory.items` 或 `quests.main_quest.step` 这样的复杂数据。
 *   **定时事件系统**：使用 `<TIMED_SET::...>` 命令可以安排在未来的某个回合或某个游戏中时间点自动更新状态。
-*   【实验性】**沙盒化的函数执行 (`EVAL`)**：一个为高级用户准备的强大功能。您可以在状态中定义自己的 JavaScript 函数，并让 AI 通过 `<EVAL::...>` 命令来执行它们，同时脚本会限制其运行时间并可选地阻止网络访问，确保安全。
+*   **沙盒化的函数执行 (`EVAL`)**：一个为高级用户准备的强大功能。您可以在状态中定义自己的 JavaScript 函数，并让 AI 通过 `<EVAL::...>` 命令来执行它们。现在更进一步，**支持周期性自动执行和精确的执行顺序控制（先于或后于其他命令）**，同时脚本会限制其运行时间并可选地阻止网络访问，确保逻辑的严密与安全。
 
 ## 依赖插件
 
@@ -179,35 +179,52 @@ SAM 的核心思想是将“状态”作为一个持久化的数据块，附加�
 
 ### 1. 在状态中定义函数
 
-在您的初始状态中，向 `func` 数组添加一个函数定义对象。
+在您的初始状态中，向 `func` 数组添加一个函数定义对象。一个函数定义对象包含以下属性：
+
+*   `func_name`: (字符串, 必需) 函数的调用名称。
+*   `func_body`: (字符串, 必需) 函数的 JavaScript 代码体。您可以使用 `state` 访问和修改整个状态对象，也可以使用 `_` (Lodash.js 库)。
+*   `func_params`: (数组, 可选) 参数名列表，AI 调用时需要按顺序提供。支持剩余参数（如 `"param1", "...rest_of_params"`）。
+*   `timeout`: (数字, 可选) 超时时间（毫秒），默认为 `2000`。
+*   `network_access`: (布尔值, 可选) 是否允许函数进行网络请求 (`fetch`, `XMLHttpRequest`)。默认为 `false`。**强烈建议保持为 `false`。**
+*   **`periodic`**: (布尔值, 可选) 若设为 `true`，此函数将在**每次AI回复后自动执行**，无需在消息中显式调用。非常适合处理每回合都要计算的状态，如中毒效果、饥饿度下降等。
+*   **`order`**: (字符串, 可选) 控制执行时机，可设为 `'first'` 或 `'last'`。
+    *   `'first'`: 在处理标准命令（如 `<SET>`）**之前**执行。
+    *   `'last'`: 在处理完所有标准命令**之后**执行。
+    *   默认：与标准命令一起按出现顺序执行。
+*   **`sequence`**: (数字, 可选) 为同一 `order` 组内的函数排序，数字越小越先执行。例如，两个 `order: 'last'` 的函数，`sequence: 10` 的会比 `sequence: 20` 的先运行。
+
+#### 示例 1：需要显式调用的伤害计算函数
 
 ```json
 {
-  "static": { ... },
-  "time": "...",
-  "volatile": [],
-  "responseSummary": [],
-  "func": [
-    {
-      "func_name": "calculateDamage",
-      "func_params": ["baseDamage", "armor"],
-      "func_body": "const finalDamage = Math.max(0, baseDamage - armor); _.set(state.static.player, 'health', state.static.player.health - finalDamage); console.log(`玩家受到了 ${finalDamage} 点伤害。`);",
-      "timeout": 1000,
-      "network_access": false
-    }
-  ]
+  "func_name": "calculateDamage",
+  "func_params": ["baseDamage", "armor"],
+  "func_body": "const finalDamage = Math.max(0, baseDamage - armor); _.set(state.static.player, 'health', state.static.player.health - finalDamage); console.log(`玩家受到了 ${finalDamage} 点伤害。`);",
+  "timeout": 1000,
+  "network_access": false
 }
 ```
 
-*   `func_name`: 函数的调用名称。
-*   `func_params`: 参数名列表，AI 调用时需要按顺序提供。支持剩余参数（如 `"param1", "...rest_of_params"`）。
-*   `func_body`: 函数的 JavaScript 代码体。您可以使用 `state` 访问和修改整个状态对象，也可以使用 `_` (Lodash.js 库)。
-*   `timeout`: 超时时间（毫秒）。
-*   `network_access`: 是否允许函数进行网络请求 (`fetch`, `XMLHttpRequest`)。默认为 `false`。**强烈建议保持为 `false`。**
+#### 示例 2：自动清理库存的周期性函数
 
-### 2. 让 AI 调用函数
+这个函数会在每回合**最后**（`order: 'last'`）自动运行（`periodic: true`），清理掉背包里数量小于等于0的物品。
 
-现在，您可以指导 AI 在适当的时候调用这个函数。
+```json
+{
+  "func_name": "cleanup_inventory",
+  "func_params": [],
+  "periodic": true,
+  "order": "last",
+  "sequence": 99,
+  "func_body": "const inventory = state?.static?.sfe?.inventory; if (!inventory || !Array.isArray(inventory)) { return; } const removedCount = _.remove(inventory, item => !item.quantity || item.quantity <= 0).length; if (removedCount > 0) { console.log(`[SAM] 自动清理了 ${removedCount} 个数量为0的物品。`); }"
+}
+```
+
+### 2. 调用函数的方式
+
+#### 方式一：AI 显式调用
+
+对于没有设置 `periodic: true` 的函数，你需要指导 AI 在适当的时候通过 `<EVAL>` 命令来调用它。
 
 **AI 回复示例**:
 > 哥布林挥舞着它的木棒，狠狠地砸在了你的身上！
@@ -218,3 +235,9 @@ SAM 的核心思想是将“状态”作为一个持久化的数据块，附加�
 2.  将 `15` 作为 `baseDamage`，`5` 作为 `armor` 传入。
 3.  执行函数体中的代码，计算出 10 点伤害，并用 `_.set` 将 `state.static.player.health` 更新为新值。
 4.  将更新后的状态写入消息中。
+
+#### 方式二：周期性自动执行
+
+对于设置了 `periodic: true` 的函数，你**无需做任何事**。SAM 会在每次 AI 回复生成后，根据其 `order` 和 `sequence` 设置，在合适的时机自动执行它。
+
+这对于实现自动化游戏机制至关重要。例如，在上面的 `cleanup_inventory` 示例中，如果 AI 的回复中包含了一个命令 `<SET :: player.inventory[2].quantity :: 0>`，将某个药水的数量设为了0，那么 `cleanup_inventory` 函数会在这个 SET 命令执行**之后**运行，从而将这个数量为0的药水从库存中移除，保证了数据的整洁。
