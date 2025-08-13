@@ -1,13 +1,14 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.0.1
+// == Version: 3.1.0
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
 // == functions, ensuring proper variable display and structure.
 // == It correctly handles state during swipes and regenerations by using
 // == the GENERATION_STARTED event to prepare the state, fixing race conditions.
-// == It also includes a sandboxed EVAL command for user-defined functions.
+// == It also includes a sandboxed EVAL command for user-defined functions,
+// == now with support for execution ordering and periodic execution.
 // ==
 // ============================================================================
 // ****************************
@@ -102,14 +103,19 @@
     // Syntax:       <EVAL :: function_name :: param1 :: param2 :: ...>
     // WARNING: DANGEROUS FUNCTIONALITY. KNOW WHAT YOU ARE DOING, I WILL NOT TAKE RESPONSIBILITY FOR YOUR FAILURES AS STATED IN LICENSE.
     // YOU HAVE BEEN WARNED.
-    // EVAL logic:
-    // a function object:
-    // func[x] -> {}
-    // func[x].func_name
-    // func[x].func_params
-    // func[x].timeout
-    // func[x].network_access
-    // func[x].period - manages periodicity.
+    // EVAL logic: A function is an object in the `state.func` array with these properties:
+    //  - func_name (string, required): The name to call the function with.
+    //  - func_body (string, required): The JavaScript code to execute.
+    //  - func_params (array of strings, optional): The names of the parameters your function accepts.
+    //  - timeout (number, optional): Max execution time in milliseconds. Defaults to 2000.
+    //  - network_access (boolean, optional): Set to `true` to allow `fetch` and `XMLHttpRequest`.
+    //  - periodic (boolean, optional): If `true`, the function runs automatically on every AI response.
+    //  - order (string, optional): Can be 'first' or 'last'. Controls execution timing.
+    //    'first': Runs before standard commands (SET, ADD, etc.).
+    //    'last': Runs after standard commands.
+    //    Default: Runs alongside standard commands in the order found in the message.
+    //  - sequence (number, optional): Sorts functions within the same `order` group (lower numbers run first).
+
 
     // --- HELPER FUNCTIONS ---
 
@@ -306,12 +312,6 @@
 
 
     // --- CORE LOGIC ---
-    // Todo: Process volatile updates for all the operations.
-    // this includes SET, REMOVE, DEL,... 
-    // TIMED syntax will change to <TIMED :: is_game_time? :: time :: reason :: [actual command]>
-    // to increase the flexibility of the TIMED command.
-    // you can even TIMED another TIMED because of this.
-    // to do this, you must make time a level 1 variable in your static.
     async function processVolatileUpdates(state) {
         if (!state.volatile || !state.volatile.length) return [];
         const promotedCommands = [];
@@ -359,6 +359,9 @@
     }
 
     async function applyCommandsToState(commands, state) {
+        if (!commands || commands.length === 0) {
+            return state;
+        }
         const currentRound = await getRoundCounter();
 
         // keep all the modified list paths here.
@@ -552,11 +555,7 @@
 
                     case 'EVAL': {
                         const [funcName, ...funcParams] = params;
-
                         const processedParams = funcParams.map(param => smart_parse(param));
-
-
-                        // must detect src if src is a list. We might use JSON parse as list.
 
                         if (!funcName) {
                             console.warn(`[${SCRIPT_NAME}] EVAL aborted: EVAL command requires a function name.`);
@@ -580,6 +579,59 @@
         return state;
     }
 
+    async function executeCommandPipeline(messageCommands, state) {
+        // 1. Identify periodic functions and create EVAL commands for them.
+        // Periodic functions are executed with no parameters.
+        const periodicCommands = state.func?.filter(f => f.periodic === true)
+                                         .map(f => ({ type: 'EVAL', params: f.func_name })) || [];
+    
+        const allPotentialCommands = [...messageCommands, ...periodicCommands];
+        
+        // 2. Categorize all commands based on the 'order' property of their function definition.
+        const firstEvalItems = [];
+        const lastEvalItems = [];
+        const normalCommands = [];
+        
+        const funcDefMap = new Map(state.func?.map(f => [f.func_name, f]) || []);
+
+        for (const command of allPotentialCommands) {
+            if (command.type === 'EVAL') {
+                const funcName = command.params.split('::')[0].trim();
+                const funcDef = funcDefMap.get(funcName);
+                
+                if (funcDef?.order === 'first') {
+                    firstEvalItems.push({ command, funcDef });
+                } else if (funcDef?.order === 'last') {
+                    lastEvalItems.push({ command, funcDef });
+                } else {
+                    normalCommands.push(command); // Normal EVALs are processed with other standard commands.
+                }
+            } else {
+                normalCommands.push(command); // Non-EVAL commands go into the normal group.
+            }
+        }
+
+        // 3. Sort the ordered groups by their 'sequence' number.
+        const sortBySequence = (a, b) => (a.funcDef.sequence || 0) - (b.funcDef.sequence || 0);
+        firstEvalItems.sort(sortBySequence);
+        lastEvalItems.sort(sortBySequence);
+
+        // 4. Execute the command groups in the correct order.
+        const firstCommands = firstEvalItems.map(item => item.command);
+        const lastCommands = lastEvalItems.map(item => item.command);
+
+        console.log(`[SAM] Executing ${firstCommands.length} 'first' order commands.`);
+        await applyCommandsToState(firstCommands, state);
+
+        console.log(`[SAM] Executing ${normalCommands.length} normal order commands.`);
+        await applyCommandsToState(normalCommands, state);
+
+        console.log(`[SAM] Executing ${lastCommands.length} 'last' order commands.`);
+        await applyCommandsToState(lastCommands, state);
+        
+        return state;
+    }
+
     // --- MAIN HANDLERS ---
     async function processMessageState(index) {
         console.log(`[SAM] processing message state at ${index}`);
@@ -598,32 +650,31 @@
             if (!lastAIMessage || lastAIMessage.is_user) return;
             
             var state = await getVariables();
-            
-            // state now loads from SAM_data and whatever we get will be written to SAM_data
             if (state){
                 state = state.SAM_data; 
             }
 
+            // 1. Process time-based volatile commands first.
             const promotedCommands = await processVolatileUpdates(state);
+            
+            // 2. Parse new commands from the AI's message.
             const messageContent = lastAIMessage.mes;
-
             COMMAND_REGEX.lastIndex = 0; 
-
             let match;
             const newCommands = [];
             while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
                 newCommands.push({type: match.groups.type, params: match.groups.params});
             }
             
-            console.log(`[SAM] ---- Found ${newCommands.length} command(s) to process ----`);
+            const allMessageCommands = [...promotedCommands, ...newCommands];
+            console.log(`[SAM] ---- Found ${allMessageCommands.length} command(s) to process (incl. volatile) ----`);
             
-            const newState = await applyCommandsToState([...promotedCommands, ...newCommands], state); 
+            // 3. Run all commands through the pipeline for ordering and execution.
+            const newState = await executeCommandPipeline(allMessageCommands, state);
             
-            //await replaceVariables(goodCopy(newState));
+            // 4. Update variables and the chat message.
             await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(newState));return variables});
 
-
-            
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
             const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
             const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
@@ -650,14 +701,12 @@
             
             if (state) {
                 console.log(`[SAM] replacing variables with found state at index ${index}`);
-                //await replaceVariables(goodCopy(state));
                 await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(state));return variables});
                 
             } else {
                 console.log("[SAM] did not find valid state at index, replacing with latest state")
                 const chatHistory = SillyTavern.chat;
                 const lastKnownState = await findLatestState(chatHistory, index);
-                //await replaceVariables(goodCopy(lastKnownState));
                 await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(lastKnownState));return variables});
 
 
@@ -965,11 +1014,6 @@
 
     $(() => {
         // This is the main entry point of the script.
-
-        // Step 1: Clean up any listeners from a previous version of the script.
-        // This is crucial to prevent "ghost" listeners that cause events to fire multiple times.
-
-        // - Did not work, still suffers from multiple listener and script unload but listener still working
         cleanupPreviousInstance();
 
         // Step 2: Define a standalone initialization function for the first load.
@@ -999,11 +1043,7 @@
         // Step 3: Register the new event listeners, routing them through the unified handler.
         console.log(`[${SCRIPT_NAME}] Registering new event listeners via the Unified Handler.`);
 
-        // make first the generation_started event.
-        // this is actually a gamble. We think that generation started also binds Zonde's Prompt Template plugin upon generation, so we must
-        // do variable updates earlier than Prompt Template processes the text (otherwise our update is not meaningful).
         eventMakeFirst(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
-
         eventOn(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
         eventOn(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
         eventOn(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
@@ -1013,12 +1053,11 @@
         eventOn(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
 
         // Step 4: Store a reference to the new handlers on the window object.
-        // This allows the *next* script reload to find and clean up this instance.
         window[HANDLER_STORAGE_KEY] = handlers;
         
         // Step 5: Initialize the state for the newly loaded chat.
         try {
-            console.log(`[${SCRIPT_NAME}] V3.0.1 loaded. GLHF, player.`);
+            console.log(`[${SCRIPT_NAME}] V3.1.0 loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
