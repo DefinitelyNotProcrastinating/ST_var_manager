@@ -610,7 +610,13 @@
                     normalCommands.push(command); // Normal EVALs are processed with other standard commands.
                 }
             } else {
-                normalCommands.push(command); // Non-EVAL commands go into the normal group.
+
+                if (command.type === "TIME") {
+                    // process the TIME command first. It's not an EVAL, but we do it here because we want time to go first.
+                    firstEvalItems.push(command);
+                }else{
+                    normalCommands.push(command); // Non-EVAL commands go into the normal group.
+                }
             }
         }
 
