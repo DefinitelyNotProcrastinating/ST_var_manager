@@ -416,6 +416,9 @@
                             const prev_time = state.time;
                             state.time = command.params.trim();
                             _.set(state, 'dtime', new Date(state.time) - new Date(prev_time));
+                        } else {
+                            state.time = command.params.trim();
+                            _.set(state, 'dtime', 0);
                         }
                         break;
                     }
@@ -582,15 +585,16 @@
         return state;
     }
 
+    // ========== FIXED FUNCTION ==========
     async function executeCommandPipeline(messageCommands, state) {
         // 1. Identify periodic functions and create EVAL commands for them.
-        // Periodic functions are executed with no parameters.
         const periodicCommands = state.func?.filter(f => f.periodic === true)
                                          .map(f => ({ type: 'EVAL', params: f.func_name })) || [];
     
         const allPotentialCommands = [...messageCommands, ...periodicCommands];
         
-        // 2. Categorize all commands based on the 'order' property of their function definition.
+        // 2. Categorize all commands based on their type and order property.
+        const priorityCommands = []; // For special, non-EVAL commands like TIME
         const firstEvalItems = [];
         const lastEvalItems = [];
         const normalCommands = [];
@@ -598,6 +602,12 @@
         const funcDefMap = new Map(state.func?.map(f => [f.func_name, f]) || []);
 
         for (const command of allPotentialCommands) {
+            // Special handling for non-EVAL commands that need priority
+            if (command.type === "TIME") {
+                priorityCommands.push(command);
+                continue; // Move to the next command
+            }
+
             if (command.type === 'EVAL') {
                 const funcName = command.params.split('::')[0].trim();
                 const funcDef = funcDefMap.get(funcName);
@@ -607,27 +617,25 @@
                 } else if (funcDef?.order === 'last') {
                     lastEvalItems.push({ command, funcDef });
                 } else {
-                    normalCommands.push(command); // Normal EVALs are processed with other standard commands.
+                    normalCommands.push(command); // Normal EVALs
                 }
             } else {
-
-                if (command.type === "TIME") {
-                    // process the TIME command first. It's not an EVAL, but we do it here because we want time to go first.
-                    firstEvalItems.push(command);
-                }else{
-                    normalCommands.push(command); // Non-EVAL commands go into the normal group.
-                }
+                normalCommands.push(command); // All other standard commands
             }
         }
 
-        // 3. Sort the ordered groups by their 'sequence' number.
+        // 3. Sort the ordered EVAL groups by their 'sequence' number.
         const sortBySequence = (a, b) => (a.funcDef.sequence || 0) - (b.funcDef.sequence || 0);
         firstEvalItems.sort(sortBySequence);
         lastEvalItems.sort(sortBySequence);
 
-        // 4. Execute the command groups in the correct order.
+        // 4. Extract just the command objects for execution.
         const firstCommands = firstEvalItems.map(item => item.command);
         const lastCommands = lastEvalItems.map(item => item.command);
+
+        // 5. Execute the command groups in the correct order.
+        console.log(`[SAM] Executing ${priorityCommands.length} priority commands (e.g., TIME).`);
+        await applyCommandsToState(priorityCommands, state);
 
         console.log(`[SAM] Executing ${firstCommands.length} 'first' order commands.`);
         await applyCommandsToState(firstCommands, state);
