@@ -15,6 +15,109 @@
 // Required plugins: JS-slash-runner by n0vi028
 // ****************************
 
+// Plug and play command reference, paste into prompt:
+
+/*
+command_syntax:
+  - command: SET
+    description: Sets a variable at a specified path to a given value.
+    syntax: '@.SET("path.to.var", value);'
+    parameters:
+      - name: path.to.var
+        type: string
+        description: The dot-notation path to the variable in the state object.
+      - name: value
+        type: any
+        description: The new value to assign. Can be a string, number, boolean, null, or a JSON object/array.
+
+  - command: ADD
+    description: Adds a value. If the target is a number, it performs numeric addition. If the target is a list (array), it appends the value.
+    syntax: '@.ADD("path.to.var", value_to_add);'
+    parameters:
+      - name: path.to.var
+        type: string
+        description: The path to the numeric variable or list.
+      - name: value_to_add
+        type: number | any
+        description: The number to add or the item to append to the list.
+
+  - command: DEL
+    description: Deletes an item from a list by its numerical index. The item is removed, and the list is compacted.
+    syntax: '@.DEL("path.to.list", index);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list.
+      - name: index
+        type: integer
+        description: The zero-based index of the item to delete.
+
+  - command: SELECT_SET
+    description: Finds a specific object within a list and sets a property on that object to a new value.
+    syntax: '@.SELECT_SET("path.to.list", "selector_key", "selector_value", "receiver_key", new_value);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list of objects.
+      - name: selector_key
+        type: string
+        description: The property name to search for in each object.
+      - name: selector_value
+        type: any
+        description: The value to match to find the correct object.
+      - name: receiver_key
+        type: string
+        description: The property name on the found object to update.
+      - name: new_value
+        type: any
+        description: The new value to set.
+
+  - command: SELECT_ADD
+    description: Finds a specific object within a list and adds a value to one of its properties.
+    syntax: '@.SELECT_ADD("path.to.list", "selector_key", "selector_value", "receiver_key", value_to_add);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list of objects.
+      - name: selector_key
+        type: string
+        description: The property name to search for in each object.
+      - name: selector_value
+        type: any
+        description: The value to match to find the correct object.
+      - name: receiver_key
+        type: string
+        description: The property on the found object to add to (must be a number or a list).
+      - name: value_to_add
+        type: any
+        description: The value to add or append.
+
+  - command: SELECT_DEL
+    description: Finds and completely deletes an object from a list based on a key-value match.
+    syntax: '@.SELECT_DEL("path.to.list", "selector_key", "selector_value");'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list of objects.
+      - name: selector_key
+        type: string
+        description: The property name to search for in each object.
+      - name: selector_value
+        type: any
+        description: The value to match to identify the object for deletion.
+
+  - command: RESPONSE_SUMMARY
+    description: Adds a text summary of the current response to the special `state.responseSummary` list.
+    syntax: '@.RESPONSE_SUMMARY("summary_text");'
+    parameters:
+      - name: summary_text
+        type: string
+        description: A concise summary of the AI's response.
+
+
+*/
+
+
 
 (function () {
     // --- CONFIGURATION ---
