@@ -19,6 +19,14 @@
 
 /*
 command_syntax:
+  - command: TIME
+    description: Updates the time progression.
+    syntax: '@.TIME("new_datetime_string");'
+    parameters:
+      - name: new_datetime_string
+        type: string
+        description: A string that can be parsed as a Date (e.g., "2024-07-29T10:30:00Z").
+
   - command: SET
     description: Sets a variable at a specified path to a given value.
     syntax: '@.SET("path.to.var", value);'
@@ -106,6 +114,36 @@ command_syntax:
         type: any
         description: The value to match to identify the object for deletion.
 
+
+
+  - command: TIMED_SET
+    description: Schedules a variable to be set to a new value in the future, either based on real-world time or in-game rounds.
+    syntax: '@.TIMED_SET("path.to.var", new_value, "reason", is_real_time, timepoint);'
+    parameters:
+      - name: path.to.var
+        type: string
+        description: The dot-notation path to the variable to set.
+      - name: new_value
+        type: any
+        description: The value to set the variable to when the time comes.
+      - name: reason
+        type: string
+        description: A unique identifier for this scheduled event, used for cancellation.
+      - name: is_real_time
+        type: boolean
+        description: If true, `timepoint` is a date string. If false, `timepoint` is a number of rounds from now.
+      - name: timepoint
+        type: string | integer
+        description: The target time. A date string like "2024-10-26T10:00:00Z" if `is_real_time` is true, or a number of rounds (e.g., 5) if false.
+
+  - command: CANCEL_SET
+    description: Cancels a previously scheduled TIMED_SET command.
+    syntax: '@.CANCEL_SET("identifier");'
+    parameters:
+      - name: identifier
+        type: string | integer
+        description: The `reason` string or the numerical index of the scheduled event in the `state.volatile` array to cancel.
+
   - command: RESPONSE_SUMMARY
     description: Adds a text summary of the current response to the special `state.responseSummary` list.
     syntax: '@.RESPONSE_SUMMARY("summary_text");'
@@ -114,7 +152,16 @@ command_syntax:
         type: string
         description: A concise summary of the AI's response.
 
-
+  - command: EVAL
+    description: Executes a user-defined function stored in `state.func`. DANGEROUS - use with caution.
+    syntax: '@.EVAL("function_name", param1, param2, ...);'
+    parameters:
+      - name: function_name
+        type: string
+        description: The `func_name` of the function object to execute from the `state.func` array.
+      - name: '...'
+        type: any
+        description: Optional, comma-separated parameters to pass to the function.
 */
 
 
@@ -199,6 +246,9 @@ command_syntax:
     //
     // DEL:          Deletes an item from a list by its numerical index.
     //               Syntax: @.DEL("path.to.list", index);
+    //
+    // TIME:         Updates the in-game clock and calculates time delta.
+    //               Syntax: @.TIME("YYYY-MM-DDTHH:MM:SSZ");
     //
     // TIMED_SET:    Schedules a SET command.
     //               Syntax: @.TIMED_SET("path.to.var", "new_value", "reason", is_real_time, timepoint);
