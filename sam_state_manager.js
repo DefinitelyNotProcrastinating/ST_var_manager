@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.1.0
+// == Version: 3.2.0 (Refactored Command Syntax)
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -15,6 +15,156 @@
 // Required plugins: JS-slash-runner by n0vi028
 // ****************************
 
+// Plug and play command reference, paste into prompt:
+
+/*
+command_syntax:
+  - command: TIME
+    description: Updates the time progression.
+    syntax: '@.TIME("new_datetime_string");'
+    parameters:
+      - name: new_datetime_string
+        type: string
+        description: A string that can be parsed as a Date (e.g., "2024-07-29T10:30:00Z").
+
+  - command: SET
+    description: Sets a variable at a specified path to a given value.
+    syntax: '@.SET("path.to.var", value);'
+    parameters:
+      - name: path.to.var
+        type: string
+        description: The dot-notation path to the variable in the state object.
+      - name: value
+        type: any
+        description: The new value to assign. Can be a string, number, boolean, null, or a JSON object/array.
+
+  - command: ADD
+    description: Adds a value. If the target is a number, it performs numeric addition. If the target is a list (array), it appends the value.
+    syntax: '@.ADD("path.to.var", value_to_add);'
+    parameters:
+      - name: path.to.var
+        type: string
+        description: The path to the numeric variable or list.
+      - name: value_to_add
+        type: number | any
+        description: The number to add or the item to append to the list.
+
+  - command: DEL
+    description: Deletes an item from a list by its numerical index. The item is removed, and the list is compacted.
+    syntax: '@.DEL("path.to.list", index);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list.
+      - name: index
+        type: integer
+        description: The zero-based index of the item to delete.
+
+  - command: SELECT_SET
+    description: Finds a specific object within a list and sets a property on that object to a new value.
+    syntax: '@.SELECT_SET("path.to.list", "selector_key", "selector_value", "receiver_key", new_value);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list of objects.
+      - name: selector_key
+        type: string
+        description: The property name to search for in each object.
+      - name: selector_value
+        type: any
+        description: The value to match to find the correct object.
+      - name: receiver_key
+        type: string
+        description: The property name on the found object to update.
+      - name: new_value
+        type: any
+        description: The new value to set.
+
+  - command: SELECT_ADD
+    description: Finds a specific object within a list and adds a value to one of its properties.
+    syntax: '@.SELECT_ADD("path.to.list", "selector_key", "selector_value", "receiver_key", value_to_add);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list of objects.
+      - name: selector_key
+        type: string
+        description: The property name to search for in each object.
+      - name: selector_value
+        type: any
+        description: The value to match to find the correct object.
+      - name: receiver_key
+        type: string
+        description: The property on the found object to add to (must be a number or a list).
+      - name: value_to_add
+        type: any
+        description: The value to add or append.
+
+  - command: SELECT_DEL
+    description: Finds and completely deletes an object from a list based on a key-value match.
+    syntax: '@.SELECT_DEL("path.to.list", "selector_key", "selector_value");'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list of objects.
+      - name: selector_key
+        type: string
+        description: The property name to search for in each object.
+      - name: selector_value
+        type: any
+        description: The value to match to identify the object for deletion.
+
+
+
+  - command: TIMED_SET
+    description: Schedules a variable to be set to a new value in the future, either based on real-world time or in-game rounds.
+    syntax: '@.TIMED_SET("path.to.var", new_value, "reason", is_real_time, timepoint);'
+    parameters:
+      - name: path.to.var
+        type: string
+        description: The dot-notation path to the variable to set.
+      - name: new_value
+        type: any
+        description: The value to set the variable to when the time comes.
+      - name: reason
+        type: string
+        description: A unique identifier for this scheduled event, used for cancellation.
+      - name: is_real_time
+        type: boolean
+        description: If true, `timepoint` is a date string. If false, `timepoint` is a number of rounds from now.
+      - name: timepoint
+        type: string | integer
+        description: The target time. A date string like "2024-10-26T10:00:00Z" if `is_real_time` is true, or a number of rounds (e.g., 5) if false.
+
+  - command: CANCEL_SET
+    description: Cancels a previously scheduled TIMED_SET command.
+    syntax: '@.CANCEL_SET("identifier");'
+    parameters:
+      - name: identifier
+        type: string | integer
+        description: The `reason` string or the numerical index of the scheduled event in the `state.volatile` array to cancel.
+
+  - command: RESPONSE_SUMMARY
+    description: Adds a text summary of the current response to the special `state.responseSummary` list.
+    syntax: '@.RESPONSE_SUMMARY("summary_text");'
+    parameters:
+      - name: summary_text
+        type: string
+        description: A concise summary of the AI's response.
+
+  - command: EVAL
+    description: Executes a user-defined function stored in `state.func`. DANGEROUS - use with caution.
+    syntax: '@.EVAL("function_name", param1, param2, ...);'
+    parameters:
+      - name: function_name
+        type: string
+        description: The `func_name` of the function object to execute from the `state.func` array.
+      - name: '...'
+        type: any
+        description: Optional, comma-separated parameters to pass to the function.
+*/
+
+
 
 (function () {
     // --- CONFIGURATION ---
@@ -24,14 +174,11 @@
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
 
-    const COMMAND_REGEX = /<\|(?<type>SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\s*::\s*(?<params>[\s\S]*?)\|>/gs;
+    // [MODIFIED] Switched to a robust, code-like command syntax.
+    const COMMAND_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\b\s*\(([\s\S]*?)\)\s*;/gis;
     const INITIAL_STATE = { static: {}, time: "",volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
-
-    // impossible to see ended -> ended -> ended -> ended.....
-    // therefore we only take the first ended. -> we detect this only if the previous detected EVENT is NOT ended.
-
-
+  
     // FSM implementation strategy
 
     const STATES = {
@@ -87,34 +234,47 @@
     };
 
 
+    // [MODIFIED] Updated command documentation to reflect the new @.command(...); syntax.
     // --- Command Explanations ---
-    // SET:          Sets a variable to a value. <SET :: path.to.var :: value>
-    // ADD:          Adds a number to a variable, or an item to a list. <ADD :: path.to.var :: value>
-    // DEL:          Deletes an item from a list by its numerical index. <DEL :: list_path :: index>
-    // TIMED_SET:    Schedules a SET command. <TIMED_SET :: path.to.var :: new_value :: reason :: is_real_time? :: timepoint>
-    // CANCEL_SET:   Cancels a scheduled TIMED_SET. <CANCEL_SET :: index or reason>
-    // SELECT_ADD : ONLY add to the dict elem's property that matches the selector. <SELECT_ADD :: path.to.parent.list[dict] :: selector_param :: selector_value :: receiver_param :: receiver_value_to_add>
-    // SELECT_SET : ONLY sets the dict elem's property that matches the selector <SELECT_SET :: path.to.parent.list[dict] :: selector_param :: selector_value :: receiver_param :: receiver_value_to_set>
-    // SELECT_DEL : ONLY deletes the dict elem with a property equal to the selector <SELECT_DEL :: path.to.parent.list[dict] :: selector_param :: selector_value>
-    // RESPONSE_SUMMARY: Adds a summary of the AI's response to a list. <RESPONSE_SUMMARY :: text>
+    // All commands must end with a semicolon ';'. Parameters should be JSON-compatible (e.g., strings in double quotes).
     //
-    // EVAL command documentation
+    // SET:          Sets a variable to a value.
+    //               Syntax: @.SET("path.to.var", value);
+    //
+    // ADD:          Adds a number to a variable, or an item to a list.
+    //               Syntax: @.ADD("path.to.var", value_to_add);
+    //
+    // DEL:          Deletes an item from a list by its numerical index.
+    //               Syntax: @.DEL("path.to.list", index);
+    //
+    // TIME:         Updates the in-game clock and calculates time delta.
+    //               Syntax: @.TIME("YYYY-MM-DDTHH:MM:SSZ");
+    //
+    // TIMED_SET:    Schedules a SET command.
+    //               Syntax: @.TIMED_SET("path.to.var", "new_value", "reason", is_real_time, timepoint);
+    //               is_real_time: boolean (true for date string, false for round count)
+    //               timepoint: string (e.g., "2024-10-26T10:00:00Z") or number (e.g., 5 rounds from now)
+    //
+    // CANCEL_SET:   Cancels a scheduled TIMED_SET by its index or reason.
+    //               Syntax: @.CANCEL_SET("reason_to_cancel"); or @.CANCEL_SET(0);
+    //
+    // SELECT_ADD:   Finds an object in a list and adds a value to one of its properties.
+    //               Syntax: @.SELECT_ADD("path.to.list", "selector_key", "selector_value", "receiver_key", value_to_add);
+    //
+    // SELECT_SET:   Finds an object in a list and sets one of its properties.
+    //               Syntax: @.SELECT_SET("path.to.list", "selector_key", "selector_value", "receiver_key", value_to_set);
+    //
+    // SELECT_DEL:   Finds and deletes an entire object from a list.
+    //               Syntax: @.SELECT_DEL("path.to.list", "selector_key", "selector_value");
+    //
+    // RESPONSE_SUMMARY: Adds a summary of the AI's response to a list.
+    //               Syntax: @.RESPONSE_SUMMARY("Text summary of the response.");
+    //
     // EVAL:         Executes a user-defined function stored in the state.
-    // Syntax:       <EVAL :: function_name :: param1 :: param2 :: ...>
-    // WARNING: DANGEROUS FUNCTIONALITY. KNOW WHAT YOU ARE DOING, I WILL NOT TAKE RESPONSIBILITY FOR YOUR FAILURES AS STATED IN LICENSE.
-    // YOU HAVE BEEN WARNED.
-    // EVAL logic: A function is an object in the `state.func` array with these properties:
-    //  - func_name (string, required): The name to call the function with.
-    //  - func_body (string, required): The JavaScript code to execute.
-    //  - func_params (array of strings, optional): The names of the parameters your function accepts.
-    //  - timeout (number, optional): Max execution time in milliseconds. Defaults to 2000.
-    //  - network_access (boolean, optional): Set to `true` to allow `fetch` and `XMLHttpRequest`.
-    //  - periodic (boolean, optional): If `true`, the function runs automatically on every AI response.
-    //  - order (string, optional): Can be 'first' or 'last'. Controls execution timing.
-    //    'first': Runs before standard commands (SET, ADD, etc.).
-    //    'last': Runs after standard commands.
-    //    Default: Runs alongside standard commands in the order found in the message.
-    //  - sequence (number, optional): Sorts functions within the same `order` group (lower numbers run first).
+    //               Syntax: @.EVAL("function_name", param1, param2, ...);
+    //               WARNING: DANGEROUS. USE WITH CAUTION.
+    //
+    // EVAL logic remains the same (defined in state.func array).
 
 
     // --- HELPER FUNCTIONS ---
@@ -172,6 +332,7 @@
     }
 
     function tryParseJSON(str) {
+        // [MODIFIED] This function remains, but is now used more broadly by the parameter parser.
         try {
             return JSON.parse(str);
         } catch (e) {
@@ -294,7 +455,8 @@
                 
                 resolve(result);
 
-            } catch (error) {
+            } catch (error)
+                {
                 reject(error);
             }
         });
@@ -329,34 +491,24 @@
             const [varName, varValue, isGameTime, targetTime] = volatile;
             let triggered = isGameTime ? (new Date(String(currentTime)) >= new Date(targetTime)) : (currentRound >= targetTime);
             if (triggered) {
-                promotedCommands.push({ type: 'SET', params: `${varName} :: ${varValue}` });
+                // [MODIFIED] Generate commands in the new format. JSON.stringify ensures values are correctly formatted.
+                const params = `${JSON.stringify(varName)}, ${JSON.stringify(varValue)}`;
+                promotedCommands.push({ type: 'SET', params: params });
             } else {
-
-                if (targetTime) {
-
-                }
-
+                if (targetTime) { }
                 remainingVolatiles.push(volatile);
             }
         }
         state.volatile = remainingVolatiles;
         return promotedCommands;
     }
-
+    
+    // [MODIFIED] This function is no longer needed as the new param parser handles types correctly.
+    // Kept for EVAL command's specific needs.
     function smart_parse(value){
-
-        if (typeof value !== 'string') {
-            return value;
-        }
-
-        try {
-            // Attempt to parse the string as JSON.
-            return JSON.parse(value);
-        } catch (e) {
-            // If parsing fails, it's not a JSON string.
-            // Return the original string.
-            return value;
-        }
+        if (typeof value !== 'string') return value;
+        try { return JSON.parse(value); } 
+        catch (e) { return value; }
     }
 
     async function applyCommandsToState(commands, state) {
@@ -364,38 +516,40 @@
             return state;
         }
         const currentRound = await getRoundCounter();
-
-        // keep all the modified list paths here.
         let modifiedListPaths = new Set();
         
-
         for (const command of commands) {
-            let params = command.params.split('::').map(p => p.trim());
+            // [MODIFIED] Major change in parameter parsing.
+            // We treat the content inside (...) as a list of arguments for a JSON array.
+            // This robustly handles strings, numbers, booleans, and even JSON objects as parameters.
+            let params;
+            try {
+                // If params is empty (e.g., @.COMMAND();), treat as an empty array.
+                const paramsString = command.params.trim();
+                params = paramsString ? JSON.parse(`[${paramsString}]`) : [];
+            } catch (error) {
+                console.error(`[${SCRIPT_NAME}] Failed to parse parameters for command ${command.type}. Params: "${command.params}"`, error);
+                continue; // Skip this malformed command.
+            }
             
             try {
+                // [MODIFIED] All cases updated to use the `params` array instead of splitting a string.
                 switch (command.type) {
                     case 'SET': {
                         let [varName, varValue] = params;
                         if (!varName || varValue === undefined) continue;
-                        varValue = tryParseJSON(varValue);
-                         if (typeof varValue === 'string') {
-                            const lowerVar = varValue.trim().toLowerCase();
-                            if (lowerVar === "true") varValue = true;
-                            else if (lowerVar === "false") varValue = false;
-                            else if (lowerVar === "null") varValue = null;
-                            else if (lowerVar === "undefined") varValue = undefined;
-                        }
-                        _.set(state.static, varName, isNaN(Number(varValue)) ? varValue : Number(varValue));
+                        // The JSON.parse trick already handles types, so no extra parsing needed.
+                        _.set(state.static, varName, varValue);
                         break;
                     }
                     case 'ADD': {
-                        const [varName, incrementStr] = params;
-                        if (!varName || incrementStr === undefined) continue;
+                        const [varName, valueToAdd] = params;
+                        if (!varName || valueToAdd === undefined) continue;
                         const existing = _.get(state.static, varName, 0);
                         if (Array.isArray(existing)) {
-                            existing.push(tryParseJSON(incrementStr));
+                            existing.push(valueToAdd);
                         } else {
-                            const increment = Number(incrementStr);
+                            const increment = Number(valueToAdd);
                             const baseValue = Number(existing) || 0;
                             if (isNaN(increment) || isNaN(baseValue)) continue;
                             _.set(state.static, varName, baseValue + increment);
@@ -406,42 +560,35 @@
                         if (!Array.isArray(state.responseSummary)) {
                             state.responseSummary = state.responseSummary ? [state.responseSummary] : [];
                         }
-                        if (!state.responseSummary.includes(command.params.trim())){
-                           state.responseSummary.push(command.params.trim());
+                        const summaryText = params[0];
+                        if (summaryText && !state.responseSummary.includes(summaryText)){
+                           state.responseSummary.push(summaryText);
                         }
                         break;
                     }
                     case "TIME" : {
+                        const timeStr = params[0];
+                        if (!timeStr) continue;
                         if (state.time) {
                             const prev_time = state.time;
-                            state.time = command.params.trim();
+                            state.time = timeStr;
                             _.set(state, 'dtime', new Date(state.time) - new Date(prev_time));
                         } else {
-                            state.time = command.params.trim();
+                            state.time = timeStr;
                             _.set(state, 'dtime', 0);
                         }
                         break;
                     }
                     case 'TIMED_SET': {
-
-                        const [varName, varValue, reason, isGameTimeStr, timeUnitsStr] = params;
-                        
-                        if (!varName || !varValue || !reason || !isGameTimeStr || !timeUnitsStr) continue;
-                        
-                        const isGameTime = isGameTimeStr.toLowerCase() === 'true' || isGameTimeStr === 1;
-                        
-                        const finalValue = isNaN(varValue) ? tryParseJSON(varValue) : Number(varValue);
-                        
-                        const targetTime = isGameTime ? new Date(timeUnitsStr).toISOString() : currentRound + Number(timeUnitsStr);
-                        
+                        const [varName, varValue, reason, isGameTime, timepoint] = params;
+                        if (!varName || varValue === undefined || !reason || isGameTime === undefined || !timepoint) continue;
+                        const targetTime = isGameTime ? new Date(timepoint).toISOString() : currentRound + Number(timepoint);
                         if(!state.volatile) state.volatile = [];
-                        
-                        state.volatile.push([varName, finalValue, isGameTime, targetTime, reason]);
-                        
+                        state.volatile.push([varName, varValue, isGameTime, targetTime, reason]);
                         break;
                     }
                     case 'CANCEL_SET': {
-                        if (!params[0] || !state.volatile?.length) continue;
+                        if (params.length === 0 || !state.volatile?.length) continue;
                         const identifier = params[0];
                         const index = parseInt(identifier, 10);
                         if (!isNaN(index) && index >= 0 && index < state.volatile.length) {
@@ -455,23 +602,14 @@
                         break;
                     }
                     case 'DEL': {
-                        const [listPath, indexStr] = params;
-                        
-                        if (!listPath || indexStr === undefined) continue;
-                        
-                        const index = parseInt(indexStr, 10);
-                        
-                        if (isNaN(index)) continue;
-                        
+                        const [listPath, index] = params;
+                        if (!listPath || index === undefined || isNaN(Number(index))) continue;
                         const list = _.get(state.static, listPath);
-
                         if (!Array.isArray(list)) continue;
-                        
                         if (index >= 0 && index < list.length) {
                             list[index] = undefined;
                             modifiedListPaths.add(listPath);
                         }
-                        
                         break;
                     }
                     case 'SELECT_DEL': {
@@ -479,95 +617,46 @@
                         if (!listPath || !identifier || targetId === undefined) continue;
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) continue;
-                        _.set(state.static, listPath, _.reject(list, {[identifier]: tryParseJSON(targetId)}));
+                        _.set(state.static, listPath, _.reject(list, {[identifier]: targetId}));
                         break;
                     }
-
                     case 'SELECT_ADD' : {
-                        // <SELECT_ADD :: parent_list :: selector_property :: selector_value :: receiver_property :: value_to_add>
                         const [listPath, selectorProp, selectorVal, receiverProp, valueToAdd] = params;
-                        if (!listPath || !selectorProp || selectorVal === undefined || !receiverProp || valueToAdd === undefined) {
-                            console.warn(`[SAM] SELECT_ADD aborted: Missing parameters. Got: ${params.join(' :: ')}`);
-                            continue;
-                        }
-                    
+                        if (!listPath || !selectorProp || selectorVal === undefined || !receiverProp || valueToAdd === undefined) continue;
                         const list = _.get(state.static, listPath);
-                        if (!Array.isArray(list)) {
-                            console.warn(`[SAM] SELECT_ADD aborted: Path '${listPath}' does not resolve to an array.`);
-                            continue;
-                        }
-                    
-                        const parsedSelectorVal = tryParseJSON(selectorVal);
-                        const targetObject = _.find(list, { [selectorProp]: parsedSelectorVal });
-                    
-                        if (!targetObject) {
-                            console.warn(`[SAM] SELECT_ADD: Could not find object in '${listPath}' where '${selectorProp}' is '${parsedSelectorVal}'.`);
-                            continue;
-                        }
-                    
+                        if (!Array.isArray(list)) continue;
+                        const targetObject = _.find(list, { [selectorProp]: selectorVal });
+                        if (!targetObject) continue;
                         const existingValue = _.get(targetObject, receiverProp);
-
-                        // Logic now mirrors the main 'ADD' command
                         if (Array.isArray(existingValue)) {
-                            existingValue.push(tryParseJSON(valueToAdd));
+                            existingValue.push(valueToAdd);
                             _.set(targetObject, receiverProp, existingValue);
                         } else {
                             const baseValue = Number(existingValue) || 0;
-                            const increment = Number(valueToAdd); // Directly convert the string param
-                            if (isNaN(baseValue) || isNaN(increment)) {
-                                 console.warn(`[SAM] SELECT_ADD: Cannot perform numeric addition on non-numeric values for property '${receiverProp}'. Current: '${existingValue}', Add: '${valueToAdd}'`);
-                                 continue;
-                            }
+                            const increment = Number(valueToAdd);
+                            if (isNaN(baseValue) || isNaN(increment)) continue;
                             _.set(targetObject, receiverProp, baseValue + increment);
                         }
                         break;
                     }
-
                     case 'SELECT_SET' : {
-                        // <SELECT_SET :: parent_list :: selector_property :: selector_value :: receiver_property:: value_to_set>
                         const [listPath, selectorProp, selectorVal, receiverProp, valueToSet] = params;
-                        if (!listPath || !selectorProp || selectorVal === undefined || !receiverProp || valueToSet === undefined) {
-                            console.warn(`[SAM] SELECT_SET aborted: Missing parameters. Got: ${params.join(' :: ')}`);
-                            continue;
-                        }
-
+                        if (!listPath || !selectorProp || selectorVal === undefined || !receiverProp || valueToSet === undefined) continue;
                         const list = _.get(state.static, listPath);
-                        if (!Array.isArray(list)) {
-                            console.warn(`[SAM] SELECT_SET aborted: Path '${listPath}' does not resolve to an array.`);
-                            continue;
-                        }
-
-                        const parsedSelectorVal = tryParseJSON(selectorVal);
-                        const targetObject = _.find(list, { [selectorProp]: parsedSelectorVal });
-
-                        if (!targetObject) {
-                            console.warn(`[SAM] SELECT_SET: Could not find object in '${listPath}' where '${selectorProp}' is '${parsedSelectorVal}'.`);
-                            continue;
-                        }
-
-                        // Logic now mirrors the main 'SET' command for robust value parsing
-                        let valueToSetProcessed = tryParseJSON(valueToSet);
-                        if (typeof valueToSetProcessed === 'string') {
-                            const lowerVar = valueToSetProcessed.trim().toLowerCase();
-                            if (lowerVar === "true") valueToSetProcessed = true;
-                            else if (lowerVar === "false") valueToSetProcessed = false;
-                            else if (lowerVar === "null") valueToSetProcessed = null;
-                            else if (lowerVar === "undefined") valueToSetProcessed = undefined;
-                        }
-
-                        _.set(targetObject, receiverProp, isNaN(Number(valueToSetProcessed)) ? valueToSetProcessed : Number(valueToSetProcessed));
+                        if (!Array.isArray(list)) continue;
+                        const targetObject = _.find(list, { [selectorProp]: selectorVal });
+                        if (!targetObject) continue;
+                        _.set(targetObject, receiverProp, valueToSet);
                         break;
                     }
-
                     case 'EVAL': {
                         const [funcName, ...funcParams] = params;
-                        const processedParams = funcParams.map(param => smart_parse(param));
-
                         if (!funcName) {
                             console.warn(`[${SCRIPT_NAME}] EVAL aborted: EVAL command requires a function name.`);
                             continue;
                         }
-                        await runSandboxedFunction(funcName, processedParams, state);
+                        // EVAL params are already parsed correctly by our JSON trick.
+                        await runSandboxedFunction(funcName, funcParams, state);
                         break;
                     }
                 }
@@ -576,7 +665,6 @@
             }
         }
 
-        // handle DELs properly.
         for (const path of modifiedListPaths){
             const list = _.get(state.static, path);
             _.remove(list, (item) => item === undefined);
@@ -584,17 +672,15 @@
 
         return state;
     }
-
+    
     // ========== FIXED FUNCTION ==========
     async function executeCommandPipeline(messageCommands, state) {
-        // 1. Identify periodic functions and create EVAL commands for them.
         const periodicCommands = state.func?.filter(f => f.periodic === true)
-                                         .map(f => ({ type: 'EVAL', params: f.func_name })) || [];
+                                         .map(f => ({ type: 'EVAL', params: `"${f.func_name}"` })) || [];
     
         const allPotentialCommands = [...messageCommands, ...periodicCommands];
         
-        // 2. Categorize all commands based on their type and order property.
-        const priorityCommands = []; // For special, non-EVAL commands like TIME
+        const priorityCommands = [];
         const firstEvalItems = [];
         const lastEvalItems = [];
         const normalCommands = [];
@@ -602,14 +688,14 @@
         const funcDefMap = new Map(state.func?.map(f => [f.func_name, f]) || []);
 
         for (const command of allPotentialCommands) {
-            // Special handling for non-EVAL commands that need priority
             if (command.type === "TIME") {
                 priorityCommands.push(command);
-                continue; // Move to the next command
+                continue;
             }
 
             if (command.type === 'EVAL') {
-                const funcName = command.params.split('::')[0].trim();
+                // [MODIFIED] Safely parse the function name from the params string.
+                const funcName = (command.params.split(',')[0] || '').trim().replace(/"/g, '');
                 const funcDef = funcDefMap.get(funcName);
                 
                 if (funcDef?.order === 'first') {
@@ -617,37 +703,32 @@
                 } else if (funcDef?.order === 'last') {
                     lastEvalItems.push({ command, funcDef });
                 } else {
-                    normalCommands.push(command); // Normal EVALs
+                    normalCommands.push(command);
                 }
             } else {
-                normalCommands.push(command); // All other standard commands
+                normalCommands.push(command);
             }
         }
 
-        // 3. Sort the ordered EVAL groups by their 'sequence' number.
         const sortBySequence = (a, b) => (a.funcDef.sequence || 0) - (b.funcDef.sequence || 0);
         firstEvalItems.sort(sortBySequence);
         lastEvalItems.sort(sortBySequence);
 
-        // 4. Extract just the command objects for execution.
         const firstCommands = firstEvalItems.map(item => item.command);
         const lastCommands = lastEvalItems.map(item => item.command);
 
-        // 5. Execute the command groups in the correct order.
         console.log(`[SAM] Executing ${priorityCommands.length} priority commands (e.g., TIME).`);
         await applyCommandsToState(priorityCommands, state);
-
         console.log(`[SAM] Executing ${firstCommands.length} 'first' order commands.`);
         await applyCommandsToState(firstCommands, state);
-
         console.log(`[SAM] Executing ${normalCommands.length} normal order commands.`);
         await applyCommandsToState(normalCommands, state);
-
         console.log(`[SAM] Executing ${lastCommands.length} 'last' order commands.`);
         await applyCommandsToState(lastCommands, state);
         
         return state;
     }
+
 
     // --- MAIN HANDLERS ---
     async function processMessageState(index) {
@@ -671,28 +752,23 @@
                 state = state.SAM_data; 
             }
 
-            // 1. Process time-based volatile commands first.
             const promotedCommands = await processVolatileUpdates(state);
             
-            // 2. Parse new commands from the AI's message.
             const messageContent = lastAIMessage.mes;
             COMMAND_REGEX.lastIndex = 0; 
             let match;
             const newCommands = [];
+            // [MODIFIED] The parsing loop now uses numbered capture groups and normalizes the command type to uppercase.
             while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
-                newCommands.push({type: match.groups.type, params: match.groups.params});
+                newCommands.push({type: match[1].toUpperCase(), params: match[2].trim()});
             }
             
             const allMessageCommands = [...promotedCommands, ...newCommands];
             console.log(`[SAM] ---- Found ${allMessageCommands.length} command(s) to process (incl. volatile) ----`);
             
-            // 3. Run all commands through the pipeline for ordering and execution.
             const newState = await executeCommandPipeline(allMessageCommands, state);
 
-
-            // 4. Update variables and the chat message.
             await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(newState));return variables});
-
 
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
             const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
@@ -727,8 +803,6 @@
                 const chatHistory = SillyTavern.chat;
                 const lastKnownState = await findLatestState(chatHistory, index);
                 await updateVariablesWith(variables => {_.set(variables, "SAM_data", goodCopy(lastKnownState));return variables});
-
-
             }
 
         } catch (e) {
@@ -745,9 +819,6 @@
         }
         return -1;
     }
-
-
-
 
     // brief function to help sync.
     async function sync_latest_state(){
@@ -1076,7 +1147,7 @@
         
         // Step 5: Initialize the state for the newly loaded chat.
         try {
-            console.log(`[${SCRIPT_NAME}] V3.1.0 loaded. GLHF, player.`);
+            console.log(`[${SCRIPT_NAME}] V3.2.0 (Refactored) loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
