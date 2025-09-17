@@ -151,6 +151,7 @@ command_syntax:
         description: Optional, comma-separated parameters to pass to the function.
 */
 
+// ------------------------------------------------------------------------------------------- 
 
 (function () {
     // --- CONFIGURATION ---
@@ -524,7 +525,7 @@ command_syntax:
         if (!lastMessage || lastMessage.is_user) return; // Not an AI message, nothing to check
         if (!lastMessage.mes.includes(STATE_BLOCK_START_MARKER)) {
             const warningMsg = "Stuck State Detected: The last AI message is missing its state block. The next turn will use the previous state. This may cause inconsistencies. Consider using the 'Reset State' or 'Rerun Commands' debug buttons if issues persist.";
-            logger.error(`STUCK STATE DETECTED! Message at index ${SillyTavern.chat.length - 1} did not contain a state block after processing.`);
+            logger.error(`STUCK STATE DETECTED! Message at index ${SillyTavern.chat.length - 1} did not contain a state block after processing. please RESET the current state and MANUALLY update the variables.`);
             toastr.error(warningMsg);
         }
     }
@@ -714,6 +715,19 @@ command_syntax:
 
         } catch (e) {
             logger.warn("Could not find debug buttons. This is normal if they are not defined in the UI.", e);
+        }
+
+
+        // test version exclusive
+        try{
+            const checkGenerationStatusEvent = getButtonEvent("确认运行")
+            if (checkGenerationStatusEvent) eventOn(
+                () => {
+                    alert(`Stuck state resolver visibility (is-generating) status == ${$('#mes_stop').is(':visible')}`);
+                }
+            );
+        }catch(e){
+
         }
 
         try {
