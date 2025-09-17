@@ -175,7 +175,7 @@ command_syntax:
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
 
     // [MODIFIED] Switched to a robust, code-like command syntax.
-    const COMMAND_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\b\s*\(([\s\S]*?)\)\s*;/gis;
+    const COMMAND_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\b\s*\(([\s\S]*?)\)\s*;?/gis;
     const INITIAL_STATE = { static: {}, time: "",volatile: [], responseSummary: [], func: [] };
     let isProcessingState = false;
   
