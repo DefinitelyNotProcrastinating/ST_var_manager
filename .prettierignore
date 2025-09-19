@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+JS-Slash-Runner/
 
 # Build outputs
 dist/
@@ -12,6 +13,7 @@ build/
 # IDE
 .idea/
 .vscode/
+
 
 # Others
 *.md
