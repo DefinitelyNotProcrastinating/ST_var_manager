@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+JS-Slash-Runner/
+
+# Build outputs
+dist/
+build/
+
+# Minified files
+*.min.js
+*.min.css
+
+# IDE
+.idea/
+.vscode/
+
+
+# Others
+*.md

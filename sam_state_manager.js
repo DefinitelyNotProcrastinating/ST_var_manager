@@ -425,6 +425,12 @@ command_syntax:
         }
         return state;
     }
+    /**
+     * Executes a pipeline of commands with priority ordering
+     * @param {Array<{type: string, params: string}>} messageCommands - Array of command objects to execute
+     * @param {Object} state - The current state object
+     * @returns {Promise<Object>} The updated state after all commands are applied
+     */
     async function executeCommandPipeline(messageCommands, state) {
         const periodicCommands = state.func?.filter(f => f.periodic === true).map(f => ({ type: 'EVAL', params: `"${f.func_name}"` })) || [];
         const allPotentialCommands = [...messageCommands, ...periodicCommands];
