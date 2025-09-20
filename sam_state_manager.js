@@ -332,7 +332,9 @@ command_syntax:
         state.volatile = remainingVolatiles;
         return promotedCommands;
     }
-    async function applyCommandsToState(commands, state) {
+
+
+        async function applyCommandsToState(commands, state) {
         if (!commands || commands.length === 0) return state;
         const currentRound = await getRoundCounter();
         let modifiedListPaths = new Set();
@@ -396,18 +398,43 @@ command_syntax:
                     }
                     case 'SELECT_ADD': {
                         const [listPath, selProp, selVal, recProp, valToAdd] = params;
-                        const target = _.find(_.get(state.static, listPath), { [selProp]: selVal });
-                        if (target) {
-                            const existing = _.get(target, recProp);
-                            if (Array.isArray(existing)) { existing.push(valToAdd); }
-                            else { _.set(target, recProp, (Number(existing) || 0) + Number(valToAdd)); }
+                        const list = _.get(state.static, listPath);
+                        if (!Array.isArray(list)) {
+                            logger.warn(`[SAM] SELECT_ADD failed: Path "${listPath}" is not a list.`);
+                            break;
+                        }
+                        const targetIndex = _.findIndex(list, { [selProp]: selVal });
+                        if (targetIndex > -1) {
+                            const fullPath = `${listPath}[${targetIndex}].${recProp}`;
+                            const existing = _.get(state.static, fullPath);
+                            if (Array.isArray(existing)) {
+                                existing.push(valToAdd); // Must get reference and push for arrays
+                            } else {
+                                const newValue = (Number(existing) || 0) + Number(valToAdd);
+                                _.set(state.static, fullPath, newValue);
+                            }
+                        } else {
+                            logger.warn(`[SAM] SELECT_ADD failed: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
                         break;
                     }
                     case 'SELECT_SET': {
                         const [listPath, selProp, selVal, recProp, valToSet] = params;
-                        const target = _.find(_.get(state.static, listPath), { [selProp]: selVal });
-                        if (target) { _.set(target, recProp, valToSet); }
+                        const list = _.get(state.static, listPath);
+                        if (!Array.isArray(list)) {
+                            logger.warn(`[SAM] SELECT_SET failed: Path "${listPath}" is not a list.`);
+                            break;
+                        }
+                        const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) == selVal);
+
+                        if (targetIndex > -1) {
+                            const fullPath = `${listPath}[${targetIndex}].${recProp}`;
+                            _.set(state.static, fullPath, valToSet);
+                            
+
+                        } else {
+                            logger.warn(`[SAM] SELECT_SET failed to find object: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
+                        }
                         break;
                     }
                     case 'EVAL': {
@@ -651,20 +678,68 @@ command_syntax:
             toastr.error(msg);
             return;
         }
+
         const lastAiIndex = await findLastAiMessageAndIndex();
         if (lastAiIndex === -1) {
             toastr.info("No AI message found to rerun.");
             return;
         }
+
+        isProcessingState = true; // Lock to prevent race conditions
         try {
             toastr.info(`Rerunning commands from message at index ${lastAiIndex}...`);
-            await processMessageState(lastAiIndex);
-            toastr.success("Rerun complete.");
+
+            // Step 1: Find the state from BEFORE the message we are rerunning.
+            // This prevents commands like ADD from compounding on each rerun.
+            const previousAiIndex = await findLastAiMessageAndIndex(lastAiIndex);
+            const initialState = await findLatestState(SillyTavern.chat, previousAiIndex);
+            logger.info(`Rerun initial state loaded from index ${previousAiIndex}.`);
+
+            const messageToRerun = SillyTavern.chat[lastAiIndex];
+            const messageContent = messageToRerun.mes;
+
+            // Step 2: Extract commands from the target message.
+            COMMAND_REGEX.lastIndex = 0;
+            let match;
+            const newCommands = [];
+            while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
+                newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
+            }
+            logger.info(`Found ${newCommands.length} command(s) in message ${lastAiIndex} to rerun.`);
+
+            // Step 3: Execute the command pipeline on the initial state.
+            const newState = await executeCommandPipeline(newCommands, initialState);
+
+            // Step 4: Persist the changes robustly.
+            // 4a. Update the live variables for the next turn.
+            await updateVariablesWith(variables => {
+                _.set(variables, "SAM_data", goodCopy(newState));
+                return variables;
+            });
+            logger.info("Live variables updated with rerun state.");
+
+            // 4b. Rebuild the message content and save it directly to the chat history.
+            const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
+            const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
+            const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
+
+            // THIS IS THE KEY FIX: Directly modify the chat array.
+            //SillyTavern.chat[lastAiIndex].mes = finalContent;
+            setChatMessages([{'message_id':lastAiIndex, 'message':finalContent}]);
+
+            // 4c. Force the UI to update to reflect the change in the chat array.
+            logger.info(`Message at index ${lastAiIndex} permanently updated in chat history.`);
+
+            toastr.success("Rerun complete. State saved.");
+
         } catch (error) {
             logger.error("Manual rerun failed.", error);
             toastr.error("Rerun failed. Check console for errors.");
+        } finally {
+            isProcessingState = false; // Release the lock
         }
     }
+
 
     function displayLogs() {
         logger.info("--- LOG DISPLAY TRIGGERED ---");
