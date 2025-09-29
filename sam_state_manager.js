@@ -562,19 +562,14 @@ command_syntax:
         try {
             const message = SillyTavern.chat[index];
             if (!message) return;
-            state = parseStateFromMessage(message.mes);
+            const state = parseStateFromMessage(message.mes);
             if (state) {
                 logger.info(`replacing variables with found state at index ${index}`);
             } else {
                 logger.info("did not find valid state at index, replacing with latest state");
-                state = await findLatestState(SillyTavern.chat, index);
+                const lastKnownState = await findLatestState(SillyTavern.chat, index);
+                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(lastKnownState)); return variables });
             }
-
-
-
-            
-
-
         } catch (e) {
             logger.error(`Load state from message failed for index ${index}:`, e);
         }
@@ -592,12 +587,14 @@ command_syntax:
                 }
             }
         } catch (error) {
-            logger.error(`Error loading base data for index ${index}:`, error);
+            logger.error(`[SAM] Error loading base data for index ${index}:`, error);
         }
         
-        
-        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
-
+        if (state) {
+            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
+        }else {
+            logger.error("[SAM] Failed to find state!")
+        }
     }
     async function findLastAiMessageAndIndex(beforeIndex = -1) {
         const chat = SillyTavern.chat;
