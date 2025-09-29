@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.2.1 (Enhanced Debugging & Recovery)
+// == Version: 3.3.0 "Foundations"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -10,6 +10,8 @@
 // == It also includes a sandboxed EVAL command for user-defined functions,
 // == now with support for execution ordering and periodic execution.
 // == It now features a comprehensive logging system and recovery tools.
+// == [NEW in 3.3.0] Adds support for a __SAM_base_data__ World Info entry,
+// == allowing a base state to be loaded and merged on the first turn.
 // ============================================================================
 // ****************************
 // Required plugins: JS-slash-runner by n0vi028
@@ -178,7 +180,6 @@ command_syntax:
     const SESSION_STORAGE_KEY = "__SAM_ID__";
     var session_id = "";
 
-    // [NEW] Centralized logger
     const logger = {
         info: (...args) => {
             const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
@@ -271,6 +272,44 @@ command_syntax:
         return -1;
     }
     function goodCopy(state) { return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE); }
+
+    // [NEW] Helper function to get base data from World Info
+    async function getBaseDataFromWI() {
+        const WI_ENTRY_NAME = "__SAM_base_data__";
+        try {
+            const worldbookNames = await getCharWorldbookNames("current");
+            if (!worldbookNames || !worldbookNames.primary) {
+                logger.info(`Base data check: No primary worldbook assigned.`);
+                return null;
+            }
+            const wi = await getWorldbook(worldbookNames.primary);
+            if (!wi || !Array.isArray(wi)) {
+                logger.warn(`Base data check: Could not retrieve entries for worldbook "${worldbookNames.primary}".`);
+                return null;
+            }
+            const baseDataEntry = wi.find(entry => entry.name === WI_ENTRY_NAME);
+            if (!baseDataEntry) {
+                logger.info(`Base data check: No entry named "${WI_ENTRY_NAME}" found in worldbook "${worldbookNames.primary}".`);
+                return null;
+            }
+            if (!baseDataEntry.content) {
+                logger.warn(`Base data check: Entry "${WI_ENTRY_NAME}" found, but its content is empty.`);
+                return null;
+            }
+            try {
+                const parsedData = JSON.parse(baseDataEntry.content);
+                logger.info(`Successfully parsed base data from "${WI_ENTRY_NAME}".`);
+                return parsedData;
+            } catch (jsonError) {
+                logger.error(`Base data check: Failed to parse JSON from entry "${WI_ENTRY_NAME}".`, jsonError);
+                return null;
+            }
+        } catch (error) {
+            logger.error(`Base data check: An unexpected error occurred while fetching world info.`, error);
+            return null;
+        }
+    }
+    
     async function runSandboxedFunction(funcName, params, state) {
         const funcDef = state.func?.find(f => f.func_name === funcName);
         if (!funcDef) { logger.warn(`EVAL: Function '${funcName}' not found.`); return; }
@@ -396,18 +435,42 @@ command_syntax:
                     }
                     case 'SELECT_ADD': {
                         const [listPath, selProp, selVal, recProp, valToAdd] = params;
-                        const target = _.find(_.get(state.static, listPath), { [selProp]: selVal });
-                        if (target) {
-                            const existing = _.get(target, recProp);
-                            if (Array.isArray(existing)) { existing.push(valToAdd); }
-                            else { _.set(target, recProp, (Number(existing) || 0) + Number(valToAdd)); }
+                        const list = _.get(state.static, listPath);
+                        if (!Array.isArray(list)) {
+                            logger.warn(`[SAM] SELECT_ADD failed: Path "${listPath}" is not a list.`);
+                            break;
+                        }
+                        const targetIndex = _.findIndex(list, { [selProp]: selVal });
+                        if (targetIndex > -1) {
+                            const fullPath = `${listPath}[${targetIndex}].${recProp}`;
+                            const existing = _.get(state.static, fullPath);
+                            if (Array.isArray(existing)) {
+                                existing.push(valToAdd); // Must get reference and push for arrays
+                            } else {
+                                const newValue = (Number(existing) || 0) + Number(valToAdd);
+                                _.set(state.static, fullPath, newValue);
+                            }
+                        } else {
+                            logger.warn(`[SAM] SELECT_ADD failed: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
                         break;
                     }
                     case 'SELECT_SET': {
                         const [listPath, selProp, selVal, recProp, valToSet] = params;
-                        const target = _.find(_.get(state.static, listPath), { [selProp]: selVal });
-                        if (target) { _.set(target, recProp, valToSet); }
+                        const list = _.get(state.static, listPath);
+                        if (!Array.isArray(list)) {
+                            logger.warn(`[SAM] SELECT_SET failed: Path "${listPath}" is not a list.`);
+                            break;
+                        }
+                        const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) == selVal);
+
+                        if (targetIndex > -1) {
+                            const fullPath = `${listPath}[${targetIndex}].${recProp}`;
+                            _.set(state.static, fullPath, valToSet);
+                            
+                        } else {
+                            logger.warn(`[SAM] SELECT_SET failed to find object: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
+                        }
                         break;
                     }
                     case 'EVAL': {
@@ -425,12 +488,6 @@ command_syntax:
         }
         return state;
     }
-    /**
-     * Executes a pipeline of commands with priority ordering
-     * @param {Array<{type: string, params: string}>} messageCommands - Array of command objects to execute
-     * @param {Object} state - The current state object
-     * @returns {Promise<Object>} The updated state after all commands are applied
-     */
     async function executeCommandPipeline(messageCommands, state) {
         const periodicCommands = state.func?.filter(f => f.periodic === true).map(f => ({ type: 'EVAL', params: `"${f.func_name}"` })) || [];
         const allPotentialCommands = [...messageCommands, ...periodicCommands];
@@ -469,9 +526,12 @@ command_syntax:
         isProcessingState = true;
         try {
             if (index === "{{lastMessageId}}") { index = SillyTavern.chat.length - 1; }
+            
+            var state = (await getVariables()).SAM_data;
+
             const lastAIMessage = SillyTavern.chat[index];
             if (!lastAIMessage || lastAIMessage.is_user) return;
-            var state = (await getVariables()).SAM_data;
+
             const promotedCommands = await processVolatileUpdates(state);
             const messageContent = lastAIMessage.mes;
             COMMAND_REGEX.lastIndex = 0;
@@ -497,21 +557,47 @@ command_syntax:
     }
     async function loadStateFromMessage(index) {
         if (index === "{{lastMessageId}}") { index = SillyTavern.chat.length - 1; }
+
+        var state;
         try {
             const message = SillyTavern.chat[index];
             if (!message) return;
-            const state = parseStateFromMessage(message.mes);
+            state = parseStateFromMessage(message.mes);
             if (state) {
                 logger.info(`replacing variables with found state at index ${index}`);
-                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
             } else {
                 logger.info("did not find valid state at index, replacing with latest state");
-                const lastKnownState = await findLatestState(SillyTavern.chat, index);
-                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(lastKnownState)); return variables });
+                state = await findLatestState(SillyTavern.chat, index);
             }
+
+
+
+            
+
+
         } catch (e) {
             logger.error(`Load state from message failed for index ${index}:`, e);
         }
+
+        try {
+            if (index === 0) { 
+                logger.info("[SAM] First AI response detected. Checking for __SAM_base_data__ in World Info.");
+                const baseData = await getBaseDataFromWI();
+                if (baseData) {
+                   logger.info("[SAM] Base data found. Merging it into the current state (current state takes precedence).");
+                   // Deep merge: current state's values overwrite baseData's
+                   state = _.merge({}, baseData, state); 
+                } else {
+                   logger.info("[SAM] No valid base data found. Proceeding with initial state.");
+                }
+            }
+        } catch (error) {
+            logger.error(`Error loading base data for index ${index}:`, error);
+        }
+        
+        
+        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
+
     }
     async function findLastAiMessageAndIndex(beforeIndex = -1) {
         const chat = SillyTavern.chat;
@@ -525,7 +611,6 @@ command_syntax:
         var lastlastAIMessageIdx = await findLastAiMessageAndIndex();
         await loadStateFromMessage(lastlastAIMessageIdx);
     }
-    // [NEW] Stuck State Detection
     async function checkStuckState() {
         const lastMessage = SillyTavern.chat[SillyTavern.chat.length - 1];
         if (!lastMessage || lastMessage.is_user) return; // Not an AI message, nothing to check
@@ -571,7 +656,7 @@ command_syntax:
                             logger.info("[AWAIT] Processing latest message.");
                             const index = SillyTavern.chat.length - 1;
                             await processMessageState(index);
-                            await checkStuckState(); // [NEW] Check for stuck state after processing
+                            await checkStuckState();
                             logger.info('[AWAIT] Processing complete. Transitioning to IDLE.');
                             curr_state = STATES.IDLE;
                             break;
@@ -651,18 +736,46 @@ command_syntax:
             toastr.error(msg);
             return;
         }
+
         const lastAiIndex = await findLastAiMessageAndIndex();
         if (lastAiIndex === -1) {
             toastr.info("No AI message found to rerun.");
             return;
         }
+
+        isProcessingState = true; // Lock to prevent race conditions
         try {
             toastr.info(`Rerunning commands from message at index ${lastAiIndex}...`);
-            await processMessageState(lastAiIndex);
-            toastr.success("Rerun complete.");
+            const previousAiIndex = await findLastAiMessageAndIndex(lastAiIndex);
+            const initialState = await findLatestState(SillyTavern.chat, previousAiIndex);
+            logger.info(`Rerun initial state loaded from index ${previousAiIndex}.`);
+
+            const messageToRerun = SillyTavern.chat[lastAiIndex];
+            const messageContent = messageToRerun.mes;
+            COMMAND_REGEX.lastIndex = 0;
+            let match;
+            const newCommands = [];
+            while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
+                newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
+            }
+            logger.info(`Found ${newCommands.length} command(s) in message ${lastAiIndex} to rerun.`);
+            const newState = await executeCommandPipeline(newCommands, initialState);
+            await updateVariablesWith(variables => {
+                _.set(variables, "SAM_data", goodCopy(newState));
+                return variables;
+            });
+            logger.info("Live variables updated with rerun state.");
+            const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
+            const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
+            const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
+            setChatMessages([{'message_id':lastAiIndex, 'message':finalContent}]);
+            logger.info(`Message at index ${lastAiIndex} permanently updated in chat history.`);
+            toastr.success("Rerun complete. State saved.");
         } catch (error) {
             logger.error("Manual rerun failed.", error);
             toastr.error("Rerun failed. Check console for errors.");
+        } finally {
+            isProcessingState = false; // Release the lock
         }
     }
 
@@ -710,21 +823,16 @@ command_syntax:
         window[HANDLER_STORAGE_KEY] = handlers;
 
         try {
-            // Button names are in Chinese as per original code.
-            const resetEvent = getButtonEvent("重置内部状态（慎用）"); // "Reset Internal State (Use with caution)"
-            const rerunLatestCommandsEvent = getButtonEvent("再次执行（慎用）"); // "Execute Again (Use with caution)"
-            const displayLogEvent = getButtonEvent("执行日志"); // "Execution Log"
-
+            const resetEvent = getButtonEvent("重置内部状态（慎用）");
+            const rerunLatestCommandsEvent = getButtonEvent("再次执行（慎用）");
+            const displayLogEvent = getButtonEvent("执行日志");
             if (resetEvent) eventOn(resetEvent, resetCurrentState);
             if (rerunLatestCommandsEvent) eventOn(rerunLatestCommandsEvent, rerunLatestCommands);
             if (displayLogEvent) eventOn(displayLogEvent, displayLogs);
-
         } catch (e) {
             logger.warn("Could not find debug buttons. This is normal if they are not defined in the UI.", e);
         }
 
-
-        // test version exclusive
         try{
             const checkGenerationStatusEvent = getButtonEvent("确认运行")
             if (checkGenerationStatusEvent) eventOn(
@@ -732,12 +840,10 @@ command_syntax:
                     alert(`Stuck state resolver visibility (is-generating) status == ${$('#mes_stop').is(':visible')}`);
                 }
             );
-        }catch(e){
-
-        }
+        }catch(e){}
 
         try {
-            logger.info(`V3.2.1 (Enhanced Debugging) loaded. GLHF, player.`);
+            logger.info(`V3.3.0 "Foundations" loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
