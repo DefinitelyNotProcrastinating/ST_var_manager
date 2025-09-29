@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.2.1 (Enhanced Debugging & Recovery)
+// == Version: 3.3.0 "Foundations"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -10,6 +10,8 @@
 // == It also includes a sandboxed EVAL command for user-defined functions,
 // == now with support for execution ordering and periodic execution.
 // == It now features a comprehensive logging system and recovery tools.
+// == [NEW in 3.3.0] Adds support for a __SAM_base_data__ World Info entry,
+// == allowing a base state to be loaded and merged on the first turn.
 // ============================================================================
 // ****************************
 // Required plugins: JS-slash-runner by n0vi028
@@ -178,7 +180,6 @@ command_syntax:
     const SESSION_STORAGE_KEY = "__SAM_ID__";
     var session_id = "";
 
-    // [NEW] Centralized logger
     const logger = {
         info: (...args) => {
             const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
@@ -271,6 +272,44 @@ command_syntax:
         return -1;
     }
     function goodCopy(state) { return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE); }
+
+    // [NEW] Helper function to get base data from World Info
+    async function getBaseDataFromWI() {
+        const WI_ENTRY_NAME = "__SAM_base_data__";
+        try {
+            const worldbookNames = await getCharWorldbookNames("current");
+            if (!worldbookNames || !worldbookNames.primary) {
+                logger.info(`Base data check: No primary worldbook assigned.`);
+                return null;
+            }
+            const wi = await getWorldbook(worldbookNames.primary);
+            if (!wi || !Array.isArray(wi)) {
+                logger.warn(`Base data check: Could not retrieve entries for worldbook "${worldbookNames.primary}".`);
+                return null;
+            }
+            const baseDataEntry = wi.find(entry => entry.name === WI_ENTRY_NAME);
+            if (!baseDataEntry) {
+                logger.info(`Base data check: No entry named "${WI_ENTRY_NAME}" found in worldbook "${worldbookNames.primary}".`);
+                return null;
+            }
+            if (!baseDataEntry.content) {
+                logger.warn(`Base data check: Entry "${WI_ENTRY_NAME}" found, but its content is empty.`);
+                return null;
+            }
+            try {
+                const parsedData = JSON.parse(baseDataEntry.content);
+                logger.info(`Successfully parsed base data from "${WI_ENTRY_NAME}".`);
+                return parsedData;
+            } catch (jsonError) {
+                logger.error(`Base data check: Failed to parse JSON from entry "${WI_ENTRY_NAME}".`, jsonError);
+                return null;
+            }
+        } catch (error) {
+            logger.error(`Base data check: An unexpected error occurred while fetching world info.`, error);
+            return null;
+        }
+    }
+    
     async function runSandboxedFunction(funcName, params, state) {
         const funcDef = state.func?.find(f => f.func_name === funcName);
         if (!funcDef) { logger.warn(`EVAL: Function '${funcName}' not found.`); return; }
@@ -332,9 +371,7 @@ command_syntax:
         state.volatile = remainingVolatiles;
         return promotedCommands;
     }
-
-
-        async function applyCommandsToState(commands, state) {
+    async function applyCommandsToState(commands, state) {
         if (!commands || commands.length === 0) return state;
         const currentRound = await getRoundCounter();
         let modifiedListPaths = new Set();
@@ -431,7 +468,6 @@ command_syntax:
                             const fullPath = `${listPath}[${targetIndex}].${recProp}`;
                             _.set(state.static, fullPath, valToSet);
                             
-
                         } else {
                             logger.warn(`[SAM] SELECT_SET failed to find object: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
@@ -452,12 +488,6 @@ command_syntax:
         }
         return state;
     }
-    /**
-     * Executes a pipeline of commands with priority ordering
-     * @param {Array<{type: string, params: string}>} messageCommands - Array of command objects to execute
-     * @param {Object} state - The current state object
-     * @returns {Promise<Object>} The updated state after all commands are applied
-     */
     async function executeCommandPipeline(messageCommands, state) {
         const periodicCommands = state.func?.filter(f => f.periodic === true).map(f => ({ type: 'EVAL', params: `"${f.func_name}"` })) || [];
         const allPotentialCommands = [...messageCommands, ...periodicCommands];
@@ -496,9 +526,12 @@ command_syntax:
         isProcessingState = true;
         try {
             if (index === "{{lastMessageId}}") { index = SillyTavern.chat.length - 1; }
+            
+            var state = (await getVariables()).SAM_data;
+
             const lastAIMessage = SillyTavern.chat[index];
             if (!lastAIMessage || lastAIMessage.is_user) return;
-            var state = (await getVariables()).SAM_data;
+
             const promotedCommands = await processVolatileUpdates(state);
             const messageContent = lastAIMessage.mes;
             COMMAND_REGEX.lastIndex = 0;
@@ -527,15 +560,30 @@ command_syntax:
         try {
             const message = SillyTavern.chat[index];
             if (!message) return;
-            const state = parseStateFromMessage(message.mes);
+            var state = parseStateFromMessage(message.mes);
             if (state) {
                 logger.info(`replacing variables with found state at index ${index}`);
-                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
             } else {
                 logger.info("did not find valid state at index, replacing with latest state");
-                const lastKnownState = await findLatestState(SillyTavern.chat, index);
-                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(lastKnownState)); return variables });
+                state = await findLatestState(SillyTavern.chat, index);
             }
+
+
+            if (index === 0) { 
+                logger.info("[SAM] First AI response detected. Checking for __SAM_base_data__ in World Info.");
+                const baseData = await getBaseDataFromWI();
+                if (baseData) {
+                   logger.info("[SAM] Base data found. Merging it into the current state (current state takes precedence).");
+                   // Deep merge: current state's values overwrite baseData's
+                   state = _.merge({}, baseData, state); 
+                } else {
+                   logger.info("[SAM] No valid base data found. Proceeding with initial state.");
+                }
+            }
+            
+            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
+
+
         } catch (e) {
             logger.error(`Load state from message failed for index ${index}:`, e);
         }
@@ -552,7 +600,6 @@ command_syntax:
         var lastlastAIMessageIdx = await findLastAiMessageAndIndex();
         await loadStateFromMessage(lastlastAIMessageIdx);
     }
-    // [NEW] Stuck State Detection
     async function checkStuckState() {
         const lastMessage = SillyTavern.chat[SillyTavern.chat.length - 1];
         if (!lastMessage || lastMessage.is_user) return; // Not an AI message, nothing to check
@@ -598,7 +645,7 @@ command_syntax:
                             logger.info("[AWAIT] Processing latest message.");
                             const index = SillyTavern.chat.length - 1;
                             await processMessageState(index);
-                            await checkStuckState(); // [NEW] Check for stuck state after processing
+                            await checkStuckState();
                             logger.info('[AWAIT] Processing complete. Transitioning to IDLE.');
                             curr_state = STATES.IDLE;
                             break;
@@ -688,17 +735,12 @@ command_syntax:
         isProcessingState = true; // Lock to prevent race conditions
         try {
             toastr.info(`Rerunning commands from message at index ${lastAiIndex}...`);
-
-            // Step 1: Find the state from BEFORE the message we are rerunning.
-            // This prevents commands like ADD from compounding on each rerun.
             const previousAiIndex = await findLastAiMessageAndIndex(lastAiIndex);
             const initialState = await findLatestState(SillyTavern.chat, previousAiIndex);
             logger.info(`Rerun initial state loaded from index ${previousAiIndex}.`);
 
             const messageToRerun = SillyTavern.chat[lastAiIndex];
             const messageContent = messageToRerun.mes;
-
-            // Step 2: Extract commands from the target message.
             COMMAND_REGEX.lastIndex = 0;
             let match;
             const newCommands = [];
@@ -706,32 +748,18 @@ command_syntax:
                 newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
             }
             logger.info(`Found ${newCommands.length} command(s) in message ${lastAiIndex} to rerun.`);
-
-            // Step 3: Execute the command pipeline on the initial state.
             const newState = await executeCommandPipeline(newCommands, initialState);
-
-            // Step 4: Persist the changes robustly.
-            // 4a. Update the live variables for the next turn.
             await updateVariablesWith(variables => {
                 _.set(variables, "SAM_data", goodCopy(newState));
                 return variables;
             });
             logger.info("Live variables updated with rerun state.");
-
-            // 4b. Rebuild the message content and save it directly to the chat history.
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
             const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
             const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
-
-            // THIS IS THE KEY FIX: Directly modify the chat array.
-            //SillyTavern.chat[lastAiIndex].mes = finalContent;
             setChatMessages([{'message_id':lastAiIndex, 'message':finalContent}]);
-
-            // 4c. Force the UI to update to reflect the change in the chat array.
             logger.info(`Message at index ${lastAiIndex} permanently updated in chat history.`);
-
             toastr.success("Rerun complete. State saved.");
-
         } catch (error) {
             logger.error("Manual rerun failed.", error);
             toastr.error("Rerun failed. Check console for errors.");
@@ -739,7 +767,6 @@ command_syntax:
             isProcessingState = false; // Release the lock
         }
     }
-
 
     function displayLogs() {
         logger.info("--- LOG DISPLAY TRIGGERED ---");
@@ -785,21 +812,16 @@ command_syntax:
         window[HANDLER_STORAGE_KEY] = handlers;
 
         try {
-            // Button names are in Chinese as per original code.
-            const resetEvent = getButtonEvent("重置内部状态（慎用）"); // "Reset Internal State (Use with caution)"
-            const rerunLatestCommandsEvent = getButtonEvent("再次执行（慎用）"); // "Execute Again (Use with caution)"
-            const displayLogEvent = getButtonEvent("执行日志"); // "Execution Log"
-
+            const resetEvent = getButtonEvent("重置内部状态（慎用）");
+            const rerunLatestCommandsEvent = getButtonEvent("再次执行（慎用）");
+            const displayLogEvent = getButtonEvent("执行日志");
             if (resetEvent) eventOn(resetEvent, resetCurrentState);
             if (rerunLatestCommandsEvent) eventOn(rerunLatestCommandsEvent, rerunLatestCommands);
             if (displayLogEvent) eventOn(displayLogEvent, displayLogs);
-
         } catch (e) {
             logger.warn("Could not find debug buttons. This is normal if they are not defined in the UI.", e);
         }
 
-
-        // test version exclusive
         try{
             const checkGenerationStatusEvent = getButtonEvent("确认运行")
             if (checkGenerationStatusEvent) eventOn(
@@ -807,12 +829,10 @@ command_syntax:
                     alert(`Stuck state resolver visibility (is-generating) status == ${$('#mes_stop').is(':visible')}`);
                 }
             );
-        }catch(e){
-
-        }
+        }catch(e){}
 
         try {
-            logger.info(`V3.2.1 (Enhanced Debugging) loaded. GLHF, player.`);
+            logger.info(`V3.3.0 "Foundations" loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
