@@ -1,4 +1,4 @@
-# 态势感知管理器 (Situational Awareness Manager - SAM) v3.2.0
+# 态势感知管理器 (Situational Awareness Manager - SAM) v3.3.0 "Foundations"
 
 **一个为 SillyTavern 设计的强大、可靠的状态管理扩展。**
 
@@ -14,6 +14,7 @@
 *   **复杂的嵌套数据结构**：支持完整的 JSON 对象作为状态，您可以轻松管理如 `player.inventory.items` 或 `quests.main_quest.step` 这样的复杂数据。
 *   **定时事件系统**：使用 **`@.TIMED_SET(...);`** 命令可以安排在未来的某个回合或某个游戏中时间点自动更新状态。
 *   **沙盒化的函数执行 (`EVAL`)**：一个为高级用户准备的强大功能。您可以在状态中定义自己的 JavaScript 函数，并让 AI 通过 **`@.EVAL(...);`** 命令来执行它们。现在更进一步，**支持周期性自动执行和精确的执行顺序控制（先于或后于其他命令）**，同时脚本会限制其运行时间并可选地阻止网络访问，确保逻辑的严密与安全。
+*   **<font color="gold">新功能</font> 模块化的基础状态 (Base Data) 系统**：新增支持 `__SAM_base_data__` 世界信息条目。允许您创建一个可复用的“基础状态”模板（例如，包含通用规则函数或初始世界设定），并在新聊天开始时自动与角色的初始状态合并，极大地提高了角色卡的模块化和可维护性。
 
 ## 依赖插件
 
@@ -93,11 +94,6 @@ SAM 的核心思想是将“状态”作为一个持久化的数据块，附加�
 *   获取世界天气: `{{SAM_data.static.world.weather}}`
 *   获取 NPC 好感度: `{{SAM_data.static.npc.elara.favorability}}`
 
-您可以像这样构建一个动态的状态面板：
-```
-[当前状态：玩家HP: {{SAM_data.static.player.health}}/100 | 天气: {{SAM_data.static.world.weather}} | Elara好感度: {{SAM_data.static.npc.elara.favorability}}]
-```
-
 ### 第 3 步：指导 AI 修改状态
 
 您需要在角色的**指令 (Prompt)** 中告诉它如何使用 SAM 的命令。这样，AI 才能在适当的时候自主更新状态。
@@ -106,70 +102,80 @@ SAM 的核心思想是将“状态”作为一个持久化的数据块，附加�
 > 你必须在你的回复中遵循以下规则来维护世界状态。将所有命令都放在你的叙述或对话之后，每个命令必须以分号`;`结尾。
 > *   要改变一个变量，使用 **`@.SET("变量路径", 新值);`**。示例：**`@.SET("player.health", 85);`**。
 > *   要给一个数值增加，或向列表添加项目，使用 **`@.ADD("变量路径", 值);`**。示例：**`@.ADD("player.health", -10);`** 或 **`@.ADD("player.inventory", "治疗药水");`**。
-> *   要从列表中按位置删除项目，使用 **`@.DEL("列表路径", 索引);`**。索引从0开始。示例：**`@.DEL("player.inventory", 0);`**。
-> *   要更新游戏时间，使用 **`@.TIME("新的UTC时间字符串");`**。示例：**`@.TIME("2200-01-01T09:30:00Z");`**。
-> *   要更新复杂列表中的项目（例如任务），使用 `SELECT_SET`。示例：要将 ID 为 "main_quest" 的任务步骤更新为 3，使用 **`@.SELECT_SET("player.quests", "id", "main_quest", "step", 3);`**。
+
+## 新功能 (v3.3.0): 模块化与基础数据 (`__SAM_base_data__`)
+
+"Foundations" 版本引入了一个强大的新功能，允许您在**世界信息 (World Info)** 中定义一个可复用的“基础状态”。
+
+**工作原理**：在开始一个新聊天时，SAM 会在处理第一条 AI 回复时，自动查找当前角色所使用的世界信息中是否存在一个名为 `__SAM_base_data__` 的条目。如果找到，它会将其内容作为“基础”，然后将角色开场白中的“初始状态”**覆盖**在它之上。
+
+这意味着，**角色卡中的状态会覆盖并优先于世界信息中的同名状态**，允许您进行精细的定制。
+
+**核心用途**:
+*   **创建可复用的规则集**：在一个 WI 条目中定义一套通用的、周期性执行的 `EVAL` 函数（例如清理库存、数据校验、状态衰减等），然后让多个角色共享这套规则，无需在每个角色卡里重复定义。
+*   **构建世界观模板**：定义一个包含基础派系声望、世界地点、通用物品数据库等信息的基础状态，所有设定在该世界观下的角色都可以继承它。
+*   **制作职业/能力模板**：创建一个“法师”模板，其中包含基础的法力值属性和几个法术 `EVAL` 函数，任何法师角色都可以基于此进行扩展。
+
+### 如何使用
+
+1.  在您的世界信息 (World Info) 中，创建一个新条目。
+2.  将该条目的名称**精确地**设置为 `__SAM_base_data__`。
+3.  在该条目的内容中，粘贴一个完整的、合法的 SAM 状态 JSON 结构。
+
+#### 示例：创建一个包含“安全函数”的基础数据
+
+这个例子定义了三个周期性函数，它们会在每回合自动运行，以保持数据的清洁和有效性。
+
+```json
+{
+  "static": {},
+  "time": "",
+  "volatile": [],
+  "responseSummary": [],
+  "func": [
+    {
+      "func_name": "clean_stargazers",
+      "func_body": "if (!state.static.mc || !Array.isArray(state.static.mc.stargazers)) return; state.static.mc.stargazers = state.static.mc.stargazers.filter(sg => sg.model_id && sg.static_profile && sg.static_profile.description);",
+      "periodic": true,
+      "order": "last",
+      "sequence": 10
+    },
+    {
+      "func_name": "clean_inventory",
+      "func_body": "if (!state.static.mc || !Array.isArray(state.static.mc.flagship_inventory)) return; state.static.mc.flagship_inventory = state.static.mc.flagship_inventory.filter(item => item.quantity > 0);",
+      "periodic": true,
+      "order": "last",
+      "sequence": 20
+    },
+    {
+      "func_name": "normalize_lust",
+      "func_body": "if (!state.static.mc || !Array.isArray(state.static.mc.stargazers)) return; state.static.mc.stargazers.forEach(sg => { if (typeof sg.lust === 'number' && sg.lust < 0) { sg.lust = 0; } });",
+      "periodic": true,
+      "order": "last",
+      "sequence": 30
+    }
+  ]
+}
+```
+当一个角色使用包含此条目的世界信息开始新聊天时，即使他自己的 `func` 数组是空的，这三个函数也会被自动并入状态中，并从第一回合开始生效。
 
 ## 命令参考
 
 所有命令都使用格式 **`@.COMMAND(参数1, 参数2, ...);`**。字符串参数必须用双引号`""`括起来。路径均以 `static` 对象为起点。
 
-*   **SET**
-    *   功能：设置或创建一个变量。
-    *   格式：`@.SET("变量路径", 值);`
-    *   示例：`@.SET("world.time_of_day", "Night");`
+*   **SET**: `@.SET("变量路径", 值);`
+*   **ADD**: `@.ADD("变量路径", 值);`
+*   **DEL**: `@.DEL("数组路径", 索引);`
+*   **SELECT_SET**: `@.SELECT_SET("数组路径", "选择器属性", "选择器值", "接收器属性", 新值);`
+*   **SELECT_ADD**: `@.SELECT_ADD("数组路径", "选择器属性", "选择器值", "接收器属性", 要增加的值);`
+*   **SELECT_DEL**: `@.SELECT_DEL("数组路径", "属性名", "目标值");`
+*   **TIME**: `@.TIME("时间字符串");`
+*   **TIMED_SET**: `@.TIMED_SET("变量路径", 新值, "理由(唯一标识)", 是否真实时间, "时间点/回合数");`
+*   **CANCEL_SET**: `@.CANCEL_SET("索引或理由");`
+*   **RESPONSE_SUMMARY**: `@.RESPONSE_SUMMARY("总结文本");`
+*   **EVAL**: `@.EVAL("函数名", 参数1, ...);`
 
-*   **ADD**
-    *   功能：为一个数值变量增加一个数字，或向一个数组变量添加一个元素。
-    *   格式：`@.ADD("变量路径", 值);`
-    *   示例 (数值)：`@.ADD("player.gold", 50);`
-    *   示例 (数组)：`@.ADD("player.inventory", "一把生锈的钥匙");`
-
-*   **DEL**
-    *   功能：根据**索引**（位置）从数组中删除一个元素。索引从 0 开始。
-    *   格式：`@.DEL("数组路径", 索引);`
-    *   示例：要删除 `player.inventory` 中的第一个物品，使用 `@.DEL("player.inventory", 0);`。
-
-*   **SELECT_SET**
-    *   功能：在对象数组中，找到一个其‘选择器属性’等于‘选择器值’的对象，并设置该对象的‘接收器属性’为‘新值’。
-    *   格式：`@.SELECT_SET("数组路径", "选择器属性", "选择器值", "接收器属性", 新值);`
-    *   示例：假设 `player.quests` 是 `[{"id": "quest1", "status": "active"}, ...]`，要更新 `quest1` 的状态，使用 `@.SELECT_SET("player.quests", "id", "quest1", "status", "completed");`。
-
-*   **SELECT_ADD**
-    *   功能：在对象数组中，找到一个目标对象，并对其内部的数值或数组进行 `ADD` 操作。
-    *   格式：`@.SELECT_ADD("数组路径", "选择器属性", "选择器值", "接收器属性", 要增加的值);`
-    *   示例：假设 `npc.elara` 在一个NPC列表里，要增加她的好感度，使用 `@.SELECT_ADD("npcs", "name", "elara", "favorability", 10);`。
-
-*   **SELECT_DEL**
-    *   功能：从一个对象数组中，删除所有其某个属性与目标值匹配的元素。
-    *   格式：`@.SELECT_DEL("数组路径", "属性名", "目标值");`
-    *   示例：假设 `player.quests` 是 `[{"id": "quest1", ...}, {"id": "quest2", ...}]`，要移除 ID 为 `quest1` 的任务，使用 `@.SELECT_DEL("player.quests", "id", "quest1");`。
-
-*   **TIME**
-    *   功能：将顶层的 `time` 字符串更新至最新。
-    *   格式：`@.TIME("时间字符串");`
-    *   示例：`@.TIME("2200-01-01T11:52:12Z");`
-
-*   **TIMED_SET**
-    *   功能：安排一个在未来发生的 `SET` 命令。
-    *   格式：`@.TIMED_SET("变量路径", 新值, "理由(唯一标识)", 是否真实时间, "时间点/回合数");`
-    *   `是否真实时间`: `true` 表示使用游戏内的时间（UTC格式），`false` 表示使用游戏回合数。
-    *   示例 (回合)：`@.TIMED_SET("player.effects.poison", false, "中毒结束", false, 3);` (3个回合后，将 `player.effects.poison` 设为 `false`)。
-    *   示例 (真实时间)：`@.TIMED_SET("world.market.isOpen", false, "午夜关门", true, "2200-01-02T00:00:00Z");` (在指定UTC时间将市场设为关闭)。
-
-*   **CANCEL_SET**
-    *   功能：取消一个之前安排的 `TIMED_SET`。
-    *   格式：`@.CANCEL_SET("索引或理由");`
-    *   示例：`@.CANCEL_SET("中毒结束");` (取消理由为“中毒结束”的定时事件)。
-
-*   **RESPONSE_SUMMARY**
-    *   功能：向 `responseSummary` 数组添加一段对当前回复的简短总结。
-    *   格式：`@.RESPONSE_SUMMARY("总结文本");`
-    *   示例：`@.RESPONSE_SUMMARY("玩家接受了寻找神器的任务");`
-
-*   **EVAL**
-    *   功能：**（高级功能，请谨慎使用）** 执行一个在 `state.func` 中定义的自定义函数。
-    *   格式：`@.EVAL("函数名", 参数1, 参数2, ...);`
+*(为简洁起见，详细命令解释请参考上方脚本注释或历史版本 README)*
 
 ## 高级用法: `EVAL` 命令
 
@@ -179,46 +185,16 @@ SAM 的核心思想是将“状态”作为一个持久化的数据块，附加�
 
 ### 1. 在状态中定义函数
 
-在您的初始状态中，向 `func` 数组添加一个函数定义对象。一个函数定义对象包含以下属性：
+在您的初始状态或 `__SAM_base_data__` 中，向 `func` 数组添加一个函数定义对象。一个函数定义对象包含以下属性：
 
 *   `func_name`: (字符串, 必需) 函数的调用名称。
 *   `func_body`: (字符串, 必需) 函数的 JavaScript 代码体。您可以使用 `state` 访问和修改整个状态对象，也可以使用 `_` (Lodash.js 库)。
-*   `func_params`: (数组, 可选) 参数名列表，AI 调用时需要按顺序提供。支持剩余参数（如 `"param1", "...rest_of_params"`）。
+*   `func_params`: (数组, 可选) 参数名列表。
 *   `timeout`: (数字, 可选) 超时时间（毫秒），默认为 `2000`。
-*   `network_access`: (布尔值, 可选) 是否允许函数进行网络请求 (`fetch`, `XMLHttpRequest`)。默认为 `false`。**强烈建议保持为 `false`。**
-*   **`periodic`**: (布尔值, 可选) 若设为 `true`，此函数将在**每次AI回复后自动执行**，无需在消息中显式调用。非常适合处理每回合都要计算的状态，如中毒效果、饥饿度下降等。
+*   `network_access`: (布尔值, 可选) 是否允许网络请求。默认为 `false`。**强烈建议保持为 `false`。**
+*   **`periodic`**: (布尔值, 可选) 若设为 `true`，此函数将在**每次AI回复后自动执行**。
 *   **`order`**: (字符串, 可选) 控制执行时机，可设为 `'first'` 或 `'last'`。
-    *   `'first'`: 在处理标准命令（如 `@.SET(...);`）**之前**执行。
-    *   `'last'`: 在处理完所有标准命令**之后**执行。
-    *   默认：与标准命令一起按出现顺序执行。
-*   **`sequence`**: (数字, 可选) 为同一 `order` 组内的函数排序，数字越小越先执行。例如，两个 `order: 'last'` 的函数，`sequence: 10` 的会比 `sequence: 20` 的先运行。
-
-#### 示例 1：需要显式调用的伤害计算函数
-
-```json
-{
-  "func_name": "calculateDamage",
-  "func_params": ["baseDamage", "armor"],
-  "func_body": "const finalDamage = Math.max(0, baseDamage - armor); _.set(state.static.player, 'health', state.static.player.health - finalDamage); console.log(`玩家受到了 ${finalDamage} 点伤害。`);",
-  "timeout": 1000,
-  "network_access": false
-}
-```
-
-#### 示例 2：自动清理库存的周期性函数
-
-这个函数会在每回合**最后**（`order: 'last'`）自动运行（`periodic: true`），清理掉背包里数量小于等于0的物品。
-
-```json
-{
-  "func_name": "cleanup_inventory",
-  "func_params": [],
-  "periodic": true,
-  "order": "last",
-  "sequence": 99,
-  "func_body": "const inventory = state?.static?.sfe?.inventory; if (!inventory || !Array.isArray(inventory)) { return; } const removedCount = _.remove(inventory, item => !item.quantity || item.quantity <= 0).length; if (removedCount > 0) { console.log(`[SAM] 自动清理了 ${removedCount} 个数量为0的物品。`); }"
-}
-```
+*   **`sequence`**: (数字, 可选) 为同一 `order` 组内的函数排序，数字越小越先执行。
 
 ### 2. 调用函数的方式
 
@@ -230,14 +206,6 @@ SAM 的核心思想是将“状态”作为一个持久化的数据块，附加�
 > 哥布林挥舞着它的木棒，狠狠地砸在了你的身上！
 > `@.EVAL("calculateDamage", 15, 5);`
 
-当 SAM 处理这条消息时，它会：
-1.  找到名为 `calculateDamage` 的函数。
-2.  将 `15` 作为 `baseDamage`，`5` 作为 `armor` 传入。
-3.  执行函数体中的代码，计算出 10 点伤害，并用 `_.set` 将 `state.static.player.health` 更新为新值。
-4.  将更新后的状态写入消息中。
-
 #### 方式二：周期性自动执行
 
-对于设置了 `periodic: true` 的函数，你**无需做任何事**。SAM 会在每次 AI 回复生成后，根据其 `order` 和 `sequence` 设置，在合适的时机自动执行它。
-
-这对于实现自动化游戏机制至关重要。例如，在上面的 `cleanup_inventory` 示例中，如果 AI 的回复中包含了一个命令 **`@.SET("player.inventory[2].quantity", 0);`**，将某个药水的数量设为了0，那么 `cleanup_inventory` 函数会在这个 SET 命令执行**之后**运行，从而将这个数量为0的药水从库存中移除，保证了数据的整洁。
+对于设置了 `periodic: true` 的函数，你**无需做任何事**。SAM 会在每次 AI 回复生成后，根据其 `order` 和 `sequence` 设置，在合适的时机自动执行它。这对于实现自动化游戏机制至关重要。
