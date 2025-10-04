@@ -725,7 +725,7 @@ command_syntax:
 		handleChatChanged: () => {
 			setTimeout(async () => {
 				await unifiedEventHandler(tavern_events.CHAT_CHANGED);
-			}, 100);
+			}, 10);
 		},
 		handleMessageSent: () => {
 			setTimeout(async () => {
