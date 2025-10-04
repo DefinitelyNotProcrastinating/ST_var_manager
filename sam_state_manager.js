@@ -462,7 +462,7 @@ command_syntax:
                             logger.warn(`[SAM] SELECT_SET failed: Path "${listPath}" is not a list.`);
                             break;
                         }
-                        const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) == selVal);
+                        const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) === selVal);
 
                         if (targetIndex > -1) {
                             const fullPath = `${listPath}[${targetIndex}].${recProp}`;
