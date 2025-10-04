@@ -694,16 +694,50 @@ command_syntax:
         }
         isDispatching = false;
     }
+
     const handlers = {
-        handleGenerationStarted: async (ev, options, dry_run) => { await unifiedEventHandler(tavern_events.GENERATION_STARTED, ev, options, dry_run) },
-        handleGenerationEnded: async () => { await unifiedEventHandler(tavern_events.GENERATION_ENDED) },
-        handleMessageSwiped: async () => { await unifiedEventHandler(tavern_events.MESSAGE_SWIPED) },
-        handleMessageDeleted: async (message) => { await unifiedEventHandler(tavern_events.MESSAGE_DELETED, message); },
-        handleMessageEdited: async () => { await unifiedEventHandler(tavern_events.MESSAGE_EDITED) },
-        handleChatChanged: async () => { await unifiedEventHandler(tavern_events.CHAT_CHANGED) },
-        handleMessageSent: async () => { await unifiedEventHandler(tavern_events.MESSAGE_SENT) },
-        handleGenerationStopped: async () => { await unifiedEventHandler(tavern_events.GENERATION_STOPPED) },
-    };
+		handleGenerationStarted: async (ev, options, dry_run) => {
+			await unifiedEventHandler(
+				tavern_events.GENERATION_STARTED,
+				ev,
+				options,
+				dry_run,
+			);
+		},
+		handleGenerationEnded: async () => {
+			await unifiedEventHandler(tavern_events.GENERATION_ENDED);
+		},
+		handleMessageSwiped: () => {
+			setTimeout(async () => {
+				await unifiedEventHandler(tavern_events.MESSAGE_SWIPED);
+			}, 0);
+		},
+		handleMessageDeleted: (message) => {
+			setTimeout(async () => {
+				await unifiedEventHandler(tavern_events.MESSAGE_DELETED, message);
+			}, 0);
+		},
+		handleMessageEdited: () => {
+			setTimeout(async () => {
+				await unifiedEventHandler(tavern_events.MESSAGE_EDITED);
+			}, 0);
+		},
+		handleChatChanged: () => {
+			setTimeout(async () => {
+				await unifiedEventHandler(tavern_events.CHAT_CHANGED);
+			}, 100);
+		},
+		handleMessageSent: () => {
+			setTimeout(async () => {
+				await unifiedEventHandler(tavern_events.MESSAGE_SENT);
+			}, 0);
+		},
+		handleGenerationStopped: () => {
+			setTimeout(async () => {
+				await unifiedEventHandler(tavern_events.GENERATION_STOPPED);
+			}, 0);
+		},
+	};
 
     // [NEW] Debugging and Recovery Functions
     function resetCurrentState() {
