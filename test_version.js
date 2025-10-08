@@ -238,17 +238,17 @@ command_syntax:
 
     const logger = {
         info: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
+            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : (`${Sillytavern.chat.length}` +  arg)).join(' ');
             executionLog.push({ level: 'INFO', timestamp: new Date().toISOString(), message });
             console.log(`[${SCRIPT_NAME}]`, ...args);
         },
         warn: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
+            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : (`${Sillytavern.chat.length}` +  arg)).join(' ');
             executionLog.push({ level: 'WARN', timestamp: new Date().toISOString(), message });
             console.warn(`[${SCRIPT_NAME}]`, ...args);
         },
         error: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
+            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : (`${Sillytavern.chat.length}` +  arg)).join(' ');
             executionLog.push({ level: 'ERROR', timestamp: new Date().toISOString(), message });
             console.error(`[${SCRIPT_NAME}]`, ...args);
         }
@@ -534,13 +534,13 @@ command_syntax:
                             _.set(state.static, fullPath, valToSet);
                             
                         } else {
-                            logger.warn(`[SAM] SELECT_SET failed to find object: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
+                            logger.warn(`[SAM] SELECT_SET failed to find object on round ${Sillytavern.chat.length}: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
                         break;
                     }
                     case 'EVENT_BEGIN': {
                         if (getActiveEvent(state)) {
-                            logger.error("EVENT_BEGIN failed: An event is already active. Use EVENT_END first.");
+                            logger.error(`EVENT_BEGIN failed on round ${Sillytavern.chat.length}: An event is already active. Use EVENT_END first.`);
                             break;
                         }
                         const [name, objective, ...initialProcs] = params;
