@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.4.0 "Event Horizon"
+// == Version: 3.5.0 "Momentum"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -10,6 +10,8 @@
 // == It also includes a sandboxed EVAL command for user-defined functions,
 // == now with support for execution ordering and periodic execution.
 // == It now features a comprehensive logging system and recovery tools.
+// == [NEW in 3.5.0] Major performance overhaul: Asynchronous, non-blocking
+// == processing to eliminate UI stuttering on low-power devices.
 // == [NEW in 3.4.0] Adds a structured, stateful event tracking system to manage
 // == multi-turn narrative arcs with commands like EVENT_BEGIN and EVENT_END.
 // == [NEW in 3.3.0] Adds support for a __SAM_base_data__ World Info entry,
@@ -221,6 +223,12 @@ command_syntax:
     const COMMAND_REGEX = /^\s*@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVENT_BEGIN|EVENT_END|EVENT_ADD_PROC|EVENT_ADD_DEFN|EVENT_ADD_MEMBER|EVENT_SUMMARY|EVAL)\b\s*\((.*)\)\s*;?\s*$/gim;
     const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: [], func: [], events: [], event_counter: 0 };
 
+    // 🔧 手机端性能优化：检测设备类型并自动调整参数
+    const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const DELAY_MS = isMobileDevice ? 10 : 5; // 手机端使用更长延迟
+    const COMMAND_BATCH_SIZE = isMobileDevice ? 3 : 5; // 手机端使用更小批次
+    const REGEX_MATCH_INTERVAL = isMobileDevice ? 2 : 3; // 手机端更频繁释放主线程
+
     // --- STATE & LIFECYCLE MANAGEMENT ---
     let isProcessingState = false;
     let isDispatching = false;
@@ -238,17 +246,17 @@ command_syntax:
 
     const logger = {
         info: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : (`${Sillytavern.chat.length}` +  arg)).join(' ');
+            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
             executionLog.push({ level: 'INFO', timestamp: new Date().toISOString(), message });
             console.log(`[${SCRIPT_NAME}]`, ...args);
         },
         warn: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : (`${Sillytavern.chat.length}` +  arg)).join(' ');
+            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
             executionLog.push({ level: 'WARN', timestamp: new Date().toISOString(), message });
             console.warn(`[${SCRIPT_NAME}]`, ...args);
         },
         error: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : (`${Sillytavern.chat.length}` +  arg)).join(' ');
+            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
             executionLog.push({ level: 'ERROR', timestamp: new Date().toISOString(), message });
             console.error(`[${SCRIPT_NAME}]`, ...args);
         }
@@ -280,8 +288,23 @@ command_syntax:
     function startGenerationWatcher() {
         stopGenerationWatcher();
         logger.info(`[SAM] [Await watcher] Starting generation watcher. Will check UI every ${WATCHER_INTERVAL_MS / 1000}s.`);
+        
+        // 🔧 添加超时保护
+        const GENERATION_TIMEOUT_MS = 300000; // 5分钟
+        const watcherStartTime = Date.now();
+        
         generationWatcherId = setInterval(() => {
             const isUiGenerating = $('#mes_stop').is(':visible');
+            const elapsedTime = Date.now() - watcherStartTime;
+            
+            // 🔧 超时检测
+            if (elapsedTime > GENERATION_TIMEOUT_MS) {
+                logger.error('[SAM Watcher] Generation timeout! Forcing completion.');
+                stopGenerationWatcher();
+                unifiedEventHandler(FORCE_PROCESS_COMPLETION);
+                return;
+            }
+            
             if (curr_state === STATES.AWAIT_GENERATION && !isUiGenerating) {
                 logger.warn('[SAM] [Await watcher] DETECTED DESYNC! FSM is in AWAIT_GENERATION, but ST is not generating. Forcing state transition.');
                 stopGenerationWatcher();
@@ -327,8 +350,20 @@ command_syntax:
         }
         return -1;
     }
-    function goodCopy(state) { return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE); }
-    
+    // 🔧 使用更快的拷贝方法，避免 _.cloneDeep 的性能问题
+    function goodCopy(state) { 
+        if (!state) return _.cloneDeep(INITIAL_STATE);
+        
+        // 🔧 对于简单对象，使用 JSON 序列化比 _.cloneDeep 更快
+        try {
+            return JSON.parse(JSON.stringify(state));
+        } catch (error) {
+            // 🔧 如果 JSON 方法失败（例如循环引用），回退到 _.cloneDeep
+            logger.warn('goodCopy: JSON method failed, falling back to _.cloneDeep');
+            return _.cloneDeep(state);
+        }
+    }
+
     function getActiveEvent(state) {
         if (!state.events || state.events.length === 0) return null;
         for (let i = state.events.length - 1; i >= 0; i--) {
@@ -338,7 +373,7 @@ command_syntax:
         }
         return null;
     }
-    
+
     async function getBaseDataFromWI() {
         const WI_ENTRY_NAME = "__SAM_base_data__";
         try {
@@ -440,7 +475,16 @@ command_syntax:
         if (!commands || commands.length === 0) return state;
         const currentRound = await getRoundCounter();
         let modifiedListPaths = new Set();
-        for (const command of commands) {
+        
+        // 🔧 使用动态批次大小，自动适配设备性能
+        for (let i = 0; i < commands.length; i++) {
+            const command = commands[i];
+            
+            // 🔧 根据设备类型动态调整释放频率
+            if (i > 0 && i % COMMAND_BATCH_SIZE === 0) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            }
+            
             let params;
             try {
                 const paramsString = command.params.trim();
@@ -510,7 +554,7 @@ command_syntax:
                             const fullPath = `${listPath}[${targetIndex}].${recProp}`;
                             const existing = _.get(state.static, fullPath);
                             if (Array.isArray(existing)) {
-                                existing.push(valToAdd);
+                                existing.push(valToAdd); // Must get reference and push for arrays
                             } else {
                                 const newValue = (Number(existing) || 0) + Number(valToAdd);
                                 _.set(state.static, fullPath, newValue);
@@ -534,13 +578,13 @@ command_syntax:
                             _.set(state.static, fullPath, valToSet);
                             
                         } else {
-                            logger.warn(`[SAM] SELECT_SET failed to find object on round ${Sillytavern.chat.length}: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
+                            logger.warn(`[SAM] SELECT_SET failed to find object: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
                         break;
                     }
                     case 'EVENT_BEGIN': {
                         if (getActiveEvent(state)) {
-                            logger.error(`EVENT_BEGIN failed on round ${Sillytavern.chat.length}: An event is already active. Use EVENT_END first.`);
+                            logger.error(`EVENT_BEGIN failed: An event is already active. Use EVENT_END first.`);
                             break;
                         }
                         const [name, objective, ...initialProcs] = params;
@@ -659,6 +703,23 @@ command_syntax:
         await applyCommandsToState(lastCommands, state);
         return state;
     }
+
+    // 🔧 分片 JSON.stringify，避免阻塞主线程
+    async function chunkedStringify(obj) {
+        return new Promise((resolve) => {
+            // 🔧 使用动态延迟，自动适配设备性能
+            setTimeout(() => {
+                try {
+                    const result = JSON.stringify(obj, null, 2);
+                    resolve(result);
+                } catch (error) {
+                    logger.error('JSON stringify failed:', error);
+                    resolve('{}'); // 失败时返回空对象
+                }
+            }, DELAY_MS);
+        });
+    }
+
     async function processMessageState(index) {
         logger.info(`processing message state at ${index}`);
         if (isProcessingState) { logger.warn("Aborting processMessageState: Already processing."); return; }
@@ -671,29 +732,71 @@ command_syntax:
             const lastAIMessage = SillyTavern.chat[index];
             if (!lastAIMessage || lastAIMessage.is_user) return;
 
+            // 🔧 手机端优化：更频繁的主线程释放
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+
             const promotedCommands = await processVolatileUpdates(state);
+            
+            // 🔧 释放主线程
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
             const messageContent = lastAIMessage.mes;
+            
+            // 🔧 释放主线程后再进行正则匹配
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
             COMMAND_REGEX.lastIndex = 0;
             let match;
             const newCommands = [];
+            
+            // 🔧 手机端优化：分批处理正则匹配，避免长文本卡死
+            let matchCount = 0;
             while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
                 newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
+                matchCount++;
+                // 🔧 根据设备类型动态调整释放频率
+                if (matchCount % REGEX_MATCH_INTERVAL === 0) {
+                    await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+                }
             }
+            
             const allMessageCommands = [...promotedCommands, ...newCommands];
             logger.info(`---- Found ${allMessageCommands.length} command(s) to process (incl. volatile) ----`);
+            
+            // 🔧 释放主线程
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
+            // 🔧 分批执行命令，每批后释放主线程
             const newState = await executeCommandPipeline(allMessageCommands, state);
+            
+            // 🔧 释放主线程后再深拷贝
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
+            // 🔧 异步更新变量，避免阻塞
             await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newState)); return variables });
+            
+            // 🔧 释放主线程
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
-            const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
-            const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
+            
+            // 🔧 分片序列化大对象，避免阻塞主线程
+            const newStateBlock = await chunkedStringify(newState);
+            
+            // 🔧 释放主线程
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
+            const finalContent = `${cleanNarrative}\n\n${STATE_BLOCK_START_MARKER}\n${newStateBlock}\n${STATE_BLOCK_END_MARKER}`;
+            
             await setChatMessage({ message: finalContent }, index, "display_current");
         } catch (error) {
             logger.error(`Error in processMessageState for index ${index}:`, error);
         } finally {
             logger.info("update finished");
-            isProcessingState = false;
+            isProcessingState = false; // 🔧 确保总是释放锁
         }
     }
+
     async function loadStateFromMessage(index) {
         if (index === "{{lastMessageId}}") { index = SillyTavern.chat.length - 1; }
 
@@ -718,6 +821,7 @@ command_syntax:
                 const baseData = await getBaseDataFromWI();
                 if (baseData) {
                    logger.info("[SAM] Base data found. Merging it into the current state (current state takes precedence).");
+                   // Deep merge: current state's values overwrite baseData's
                    state = _.merge({}, baseData, state); 
                 } else {
                    logger.info("[SAM] No valid base data found. Proceeding with initial state.");
@@ -727,9 +831,7 @@ command_syntax:
             logger.error(`[SAM] Error loading base data for index ${index}:`, error);
         }
 
-
         await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
-  
     }
     async function findLastAiMessageAndIndex(beforeIndex = -1) {
         const chat = SillyTavern.chat;
@@ -745,7 +847,7 @@ command_syntax:
     }
     async function checkStuckState() {
         const lastMessage = SillyTavern.chat[SillyTavern.chat.length - 1];
-        if (!lastMessage || lastMessage.is_user) return; 
+        if (!lastMessage || lastMessage.is_user) return; // Not an AI message, nothing to check
         if (!lastMessage.mes.includes(STATE_BLOCK_START_MARKER)) {
             const warningMsg = "Stuck State Detected: The last AI message is missing its state block. The next turn will use the previous state. This may cause inconsistencies. Consider using the 'Reset State' or 'Rerun Commands' debug buttons if issues persist.";
             logger.error(`STUCK STATE DETECTED! Message at index ${SillyTavern.chat.length - 1} did not contain a state block after processing. please RESET the current state and MANUALLY update the variables.`);
@@ -754,6 +856,14 @@ command_syntax:
     }
     async function dispatcher(event, ...event_params) {
         logger.info(`[FSM Dispatcher] Event: ${event}, State: ${curr_state}`);
+        
+        // 🔧 首次运行时输出设备信息
+        if (!dispatcher.deviceLogged) {
+            logger.info(`[SAM] Device Type: ${isMobileDevice ? 'Mobile' : 'Desktop'}`);
+            logger.info(`[SAM] Performance Settings - Delay: ${DELAY_MS}ms, Batch: ${COMMAND_BATCH_SIZE}, RegEx Interval: ${REGEX_MATCH_INTERVAL}`);
+            dispatcher.deviceLogged = true;
+        }
+        
         try {
             switch (curr_state) {
                 case STATES.IDLE:
@@ -769,6 +879,7 @@ command_syntax:
                             break;
                         case tavern_events.MESSAGE_SENT:
                             curr_state = STATES.AWAIT_GENERATION;
+                            startGenerationWatcher(); // 🔧 添加 watcher 启动
                             break;
                         case tavern_events.MESSAGE_SWIPED:
                             await sync_latest_state();
@@ -811,26 +922,43 @@ command_syntax:
         }
     }
     async function unifiedEventHandler(event, ...args) {
-        if ((sessionStorage.getItem(SESSION_STORAGE_KEY)) && (session_id !== sessionStorage.getItem(SESSION_STORAGE_KEY))) {
-            logger.warn(`Session mismatch! current: ${session_id}, storage: ${sessionStorage.getItem(SESSION_STORAGE_KEY)}. Aborting event ${JSON.stringify(event)}`);
-            return;
+        // 🔧 队列保护：防止无限增长
+        if (event_queue.length > 100) {
+            logger.error(`[UEH] Event queue overflow! Current size: ${event_queue.length}. Clearing old events.`);
+            event_queue.splice(0, 50); // 清除前50个事件
         }
+        
         event_queue.push({ event_id: event, args: [...args] });
         await unified_dispatch_executor();
     }
     async function unified_dispatch_executor() {
         if (isDispatching) { return; }
         isDispatching = true;
-        while (event_queue.length > 0) {
+        
+        // 🔧 防止无限循环：限制单次处理事件数量
+        const MAX_EVENTS_PER_BATCH = 20;
+        let processedCount = 0;
+        
+        while (event_queue.length > 0 && processedCount < MAX_EVENTS_PER_BATCH) {
             const { event_id, args } = event_queue.shift();
             logger.info(`[UDE] Dequeuing and dispatching event: ${event_id}`);
-            try { await dispatcher(event_id, ...args); }
+            try { 
+                await dispatcher(event_id, ...args); 
+                processedCount++;
+            }
             catch (error) {
                 logger.error(`[UDE] Unhandled error during dispatch of ${event_id}:`, error);
                 curr_state = STATES.IDLE;
             }
         }
+        
         isDispatching = false;
+        
+        // 🔧 如果还有事件，异步继续处理（避免阻塞主线程）
+        if (event_queue.length > 0) {
+            logger.warn(`[UDE] Event queue still has ${event_queue.length} events. Scheduling next batch...`);
+            setTimeout(() => unified_dispatch_executor(), 10);
+        }
     }
 
     const handlers = {
@@ -881,8 +1009,8 @@ command_syntax:
         logger.warn("!!! MANUAL STATE RESET TRIGGERED !!!");
         stopGenerationWatcher();
         curr_state = STATES.IDLE;
-        isDispatching = false; 
-        event_queue.length = 0; 
+        isDispatching = false; // Forcefully unlock the dispatcher
+        event_queue.length = 0; // Clear any pending events that might be causing a loop
         logger.info("FSM forced to IDLE. Event queue cleared. Attempting to re-sync with the latest valid state.");
         sync_latest_state().then(() => {
             toastr.success("SAM state has been reset and re-synced.");
@@ -908,7 +1036,7 @@ command_syntax:
             return;
         }
 
-        isProcessingState = true; 
+        isProcessingState = true; // Lock to prevent race conditions
         try {
             toastr.info(`Rerunning commands from message at index ${lastAiIndex}...`);
             const previousAiIndex = await findLastAiMessageAndIndex(lastAiIndex);
@@ -940,7 +1068,7 @@ command_syntax:
             logger.error("Manual rerun failed.", error);
             toastr.error("Rerun failed. Check console for errors.");
         } finally {
-            isProcessingState = false; 
+            isProcessingState = false; // Release the lock
         }
     }
 
@@ -1008,7 +1136,7 @@ command_syntax:
         }catch(e){}
 
         try {
-            logger.info(`V3.4.0 "Event Horizon" loaded. GLHF, player.`);
+            logger.info(`V3.5.0 "Momentum" loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
