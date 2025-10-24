@@ -547,6 +547,7 @@ command_syntax:
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) {
                             logger.warn(`[SAM] SELECT_ADD failed: Path "${listPath}" is not a list.`);
+                            toastr.warning(`SAM SELECT_ADD: Path "${listPath}" is not a list.`);
                             break;
                         }
                         const targetIndex = _.findIndex(list, { [selProp]: selVal });
@@ -561,6 +562,7 @@ command_syntax:
                             }
                         } else {
                             logger.warn(`[SAM] SELECT_ADD failed: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
+                            toastr.warning(`SAM SELECT_ADD: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
                         break;
                     }
@@ -569,6 +571,7 @@ command_syntax:
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) {
                             logger.warn(`[SAM] SELECT_SET failed: Path "${listPath}" is not a list.`);
+                            toastr.warning(`SAM SELECT_SET: Path "${listPath}" is not a list.`);
                             break;
                         }
                         const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) === selVal);
@@ -578,6 +581,7 @@ command_syntax:
                             _.set(state.static, fullPath, valToSet);
                             
                         } else {
+                            toastr.warning(`SAM SELECT_SET: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                             logger.warn(`[SAM] SELECT_SET failed to find object: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
                         break;
