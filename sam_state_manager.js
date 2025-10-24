@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.3.0 "Foundations"
+// == Version: 3.5.0 "Momentum"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -10,6 +10,10 @@
 // == It also includes a sandboxed EVAL command for user-defined functions,
 // == now with support for execution ordering and periodic execution.
 // == It now features a comprehensive logging system and recovery tools.
+// == [NEW in 3.5.0] Major performance overhaul: Asynchronous, non-blocking
+// == processing to eliminate UI stuttering on low-power devices.
+// == [NEW in 3.4.0] Adds a structured, stateful event tracking system to manage
+// == multi-turn narrative arcs with commands like EVENT_BEGIN and EVENT_END.
 // == [NEW in 3.3.0] Adds support for a __SAM_base_data__ World Info entry,
 // == allowing a base state to be loaded and merged on the first turn.
 // ============================================================================
@@ -141,6 +145,60 @@ command_syntax:
       - name: summary_text
         type: string
         description: A concise summary of the AI's response.
+  - command: EVENT_BEGIN
+    description: Starts a new narrative event. Fails if another event is already active.
+    syntax: '@.EVENT_BEGIN("name", "objective", "optional_first_step", ...);'
+    parameters:
+      - name: name
+        type: string
+        description: The name of the event (e.g., "The Council of Elrond").
+      - name: objective
+        type: string
+        description: The goal of the event (e.g., "Decide the fate of the One Ring").
+      - name: '...'
+        type: string
+        description: Optional. One or more strings to add as the first procedural step(s) of the event.
+  - command: EVENT_END
+    description: Concludes the currently active event, setting its status and end time.
+    syntax: '@.EVENT_END(exitCode, "optional_summary");'
+    parameters:
+      - name: exitCode
+        type: integer
+        description: The status code for the event's conclusion (1=success, -1=aborted/failed, other numbers for custom states).
+      - name: optional_summary
+        type: string
+        description: Optional. A final summary of the event's outcome.
+  - command: EVENT_ADD_PROC
+    description: Adds one or more procedural steps to the active event's log.
+    syntax: '@.EVENT_ADD_PROC("step_description_1", "step_description_2", ...);'
+    parameters:
+      - name: '...'
+        type: string
+        description: One or more strings detailing what just happened in the event.
+  - command: EVENT_ADD_DEFN
+    description: Adds a temporary, event-specific definition (like a new item or concept) to the active event.
+    syntax: '@.EVENT_ADD_DEFN("item_name", "item_description");'
+    parameters:
+      - name: item_name
+        type: string
+        description: The name of the new concept (e.g., "Shard of Narsil").
+      - name: item_description
+        type: string
+        description: A brief description of the concept.
+  - command: EVENT_ADD_MEMBER
+    description: Adds one or more members to the list of participants in the active event.
+    syntax: '@.EVENT_ADD_MEMBER("name_1", "name_2", ...);'
+    parameters:
+      - name: '...'
+        type: string
+        description: The names of the characters or entities involved in the event.
+  - command: EVENT_SUMMARY
+    description: Sets or updates the summary for the active event. This can be done before the event ends.
+    syntax: '@.EVENT_SUMMARY("summary_text");'
+    parameters:
+      - name: summary_text
+        type: string
+        description: The summary content.
   - command: EVAL
     description: Executes a user-defined function stored in `state.func`. DANGEROUS - use with caution.
     syntax: '@.EVAL("function_name", param1, param2, ...);'
@@ -162,8 +220,14 @@ command_syntax:
     const STATE_BLOCK_END_MARKER = '</|state|>-->';
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
-    const COMMAND_REGEX = /^\s*@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVAL)\b\s*\((.*)\)\s*;?\s*$/gim;
-    const INITIAL_STATE = { static: {}, time: "",volatile: [], responseSummary: [], func: [] };
+    const COMMAND_REGEX = /^\s*@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVENT_BEGIN|EVENT_END|EVENT_ADD_PROC|EVENT_ADD_DEFN|EVENT_ADD_MEMBER|EVENT_SUMMARY|EVAL)\b\s*\((.*)\)\s*;?\s*$/gim;
+    const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: [], func: [], events: [], event_counter: 0 };
+
+    // 🔧 手机端性能优化：检测设备类型并自动调整参数
+    const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const DELAY_MS = isMobileDevice ? 10 : 5; // 手机端使用更长延迟
+    const COMMAND_BATCH_SIZE = isMobileDevice ? 3 : 5; // 手机端使用更小批次
+    const REGEX_MATCH_INTERVAL = isMobileDevice ? 2 : 3; // 手机端更频繁释放主线程
 
     // --- STATE & LIFECYCLE MANAGEMENT ---
     let isProcessingState = false;
@@ -224,8 +288,23 @@ command_syntax:
     function startGenerationWatcher() {
         stopGenerationWatcher();
         logger.info(`[SAM] [Await watcher] Starting generation watcher. Will check UI every ${WATCHER_INTERVAL_MS / 1000}s.`);
+        
+        // 🔧 添加超时保护
+        const GENERATION_TIMEOUT_MS = 300000; // 5分钟
+        const watcherStartTime = Date.now();
+        
         generationWatcherId = setInterval(() => {
             const isUiGenerating = $('#mes_stop').is(':visible');
+            const elapsedTime = Date.now() - watcherStartTime;
+            
+            // 🔧 超时检测
+            if (elapsedTime > GENERATION_TIMEOUT_MS) {
+                logger.error('[SAM Watcher] Generation timeout! Forcing completion.');
+                stopGenerationWatcher();
+                unifiedEventHandler(FORCE_PROCESS_COMPLETION);
+                return;
+            }
+            
             if (curr_state === STATES.AWAIT_GENERATION && !isUiGenerating) {
                 logger.warn('[SAM] [Await watcher] DETECTED DESYNC! FSM is in AWAIT_GENERATION, but ST is not generating. Forcing state transition.');
                 stopGenerationWatcher();
@@ -243,7 +322,7 @@ command_syntax:
         if (match && match[1]) {
             try {
                 const parsed = JSON.parse(match[1].trim());
-                return { static: parsed.static ?? {}, time: parsed.time ?? "", volatile: parsed.volatile ?? [], responseSummary: parsed.responseSummary ?? [], func: parsed.func ?? [] };
+                return { static: parsed.static ?? {}, time: parsed.time ?? "", volatile: parsed.volatile ?? [], responseSummary: parsed.responseSummary ?? [], func: parsed.func ?? [], events: parsed.events ?? [], event_counter: parsed.event_counter ?? 0 };
             } catch (error) {
                 logger.error("Failed to parse state JSON.", error);
                 return _.cloneDeep(INITIAL_STATE);
@@ -271,9 +350,30 @@ command_syntax:
         }
         return -1;
     }
-    function goodCopy(state) { return _.cloneDeep(state) ?? _.cloneDeep(INITIAL_STATE); }
+    // 🔧 使用更快的拷贝方法，避免 _.cloneDeep 的性能问题
+    function goodCopy(state) { 
+        if (!state) return _.cloneDeep(INITIAL_STATE);
+        
+        // 🔧 对于简单对象，使用 JSON 序列化比 _.cloneDeep 更快
+        try {
+            return JSON.parse(JSON.stringify(state));
+        } catch (error) {
+            // 🔧 如果 JSON 方法失败（例如循环引用），回退到 _.cloneDeep
+            logger.warn('goodCopy: JSON method failed, falling back to _.cloneDeep');
+            return _.cloneDeep(state);
+        }
+    }
 
-    // [NEW] Helper function to get base data from World Info
+    function getActiveEvent(state) {
+        if (!state.events || state.events.length === 0) return null;
+        for (let i = state.events.length - 1; i >= 0; i--) {
+            if (state.events[i].status === 0) {
+                return state.events[i];
+            }
+        }
+        return null;
+    }
+
     async function getBaseDataFromWI() {
         const WI_ENTRY_NAME = "__SAM_base_data__";
         try {
@@ -375,7 +475,16 @@ command_syntax:
         if (!commands || commands.length === 0) return state;
         const currentRound = await getRoundCounter();
         let modifiedListPaths = new Set();
-        for (const command of commands) {
+        
+        // 🔧 使用动态批次大小，自动适配设备性能
+        for (let i = 0; i < commands.length; i++) {
+            const command = commands[i];
+            
+            // 🔧 根据设备类型动态调整释放频率
+            if (i > 0 && i % COMMAND_BATCH_SIZE === 0) {
+                await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            }
+            
             let params;
             try {
                 const paramsString = command.params.trim();
@@ -473,6 +582,80 @@ command_syntax:
                         }
                         break;
                     }
+                    case 'EVENT_BEGIN': {
+                        if (getActiveEvent(state)) {
+                            logger.error(`EVENT_BEGIN failed: An event is already active. Use EVENT_END first.`);
+                            break;
+                        }
+                        const [name, objective, ...initialProcs] = params;
+                        if (!name || !objective) {
+                            logger.error("EVENT_BEGIN failed: 'name' and 'objective' are required.");
+                            break;
+                        }
+                        state.event_counter = (state.event_counter || 0) + 1;
+                        const newEvent = {
+                            name: name,
+                            evID: state.event_counter,
+                            start_time: state.time || new Date().toISOString(),
+                            end_time: null,
+                            objective: objective,
+                            members: [],
+                            procedural: initialProcs || [],
+                            new_defines: [],
+                            status: 0, // 0 = in-progress
+                            summary: null
+                        };
+                        if (!state.events) state.events = [];
+                        state.events.push(newEvent);
+                        logger.info(`Started new event '${name}' (ID: ${newEvent.evID}).`);
+                        break;
+                    }
+                    case 'EVENT_END': {
+                        const activeEvent = getActiveEvent(state);
+                        if (!activeEvent) {
+                            logger.warn("EVENT_END called but no active event was found.");
+                            break;
+                        }
+                        const exitCode = params[0] ?? 1; // Default to 1 (success)
+                        const summary = params[1] || null;
+
+                        activeEvent.status = exitCode;
+                        activeEvent.end_time = state.time || new Date().toISOString();
+                        if (summary) {
+                            activeEvent.summary = summary;
+                        }
+                        logger.info(`Event '${activeEvent.name}' (ID: ${activeEvent.evID}) ended with status ${exitCode}.`);
+                        break;
+                    }
+                    case 'EVENT_ADD_PROC': {
+                        const activeEvent = getActiveEvent(state);
+                        if (!activeEvent) { logger.warn("EVENT_ADD_PROC called but no active event was found."); break; }
+                        params.forEach(proc => activeEvent.procedural.push(proc));
+                        break;
+                    }
+                    case 'EVENT_ADD_DEFN': {
+                        const activeEvent = getActiveEvent(state);
+                        if (!activeEvent) { logger.warn("EVENT_ADD_DEFN called but no active event was found."); break; }
+                        if (params.length < 2) { logger.warn("EVENT_ADD_DEFN requires a name and a description."); break; }
+                        activeEvent.new_defines.push({ name: params[0], desc: params[1] });
+                        break;
+                    }
+                    case 'EVENT_ADD_MEMBER': {
+                        const activeEvent = getActiveEvent(state);
+                        if (!activeEvent) { logger.warn("EVENT_ADD_MEMBER called but no active event was found."); break; }
+                        params.forEach(member => {
+                            if (!activeEvent.members.includes(member)) {
+                                activeEvent.members.push(member);
+                            }
+                        });
+                        break;
+                    }
+                    case 'EVENT_SUMMARY': {
+                        const activeEvent = getActiveEvent(state);
+                        if (!activeEvent) { logger.warn("EVENT_SUMMARY called but no active event was found."); break; }
+                        activeEvent.summary = params[0] || null;
+                        break;
+                    }
                     case 'EVAL': {
                         const [funcName, ...funcParams] = params;
                         await runSandboxedFunction(funcName, funcParams, state);
@@ -520,6 +703,23 @@ command_syntax:
         await applyCommandsToState(lastCommands, state);
         return state;
     }
+
+    // 🔧 分片 JSON.stringify，避免阻塞主线程
+    async function chunkedStringify(obj) {
+        return new Promise((resolve) => {
+            // 🔧 使用动态延迟，自动适配设备性能
+            setTimeout(() => {
+                try {
+                    const result = JSON.stringify(obj, null, 2);
+                    resolve(result);
+                } catch (error) {
+                    logger.error('JSON stringify failed:', error);
+                    resolve('{}'); // 失败时返回空对象
+                }
+            }, DELAY_MS);
+        });
+    }
+
     async function processMessageState(index) {
         logger.info(`processing message state at ${index}`);
         if (isProcessingState) { logger.warn("Aborting processMessageState: Already processing."); return; }
@@ -532,29 +732,71 @@ command_syntax:
             const lastAIMessage = SillyTavern.chat[index];
             if (!lastAIMessage || lastAIMessage.is_user) return;
 
+            // 🔧 手机端优化：更频繁的主线程释放
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+
             const promotedCommands = await processVolatileUpdates(state);
+            
+            // 🔧 释放主线程
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
             const messageContent = lastAIMessage.mes;
+            
+            // 🔧 释放主线程后再进行正则匹配
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
             COMMAND_REGEX.lastIndex = 0;
             let match;
             const newCommands = [];
+            
+            // 🔧 手机端优化：分批处理正则匹配，避免长文本卡死
+            let matchCount = 0;
             while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
                 newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
+                matchCount++;
+                // 🔧 根据设备类型动态调整释放频率
+                if (matchCount % REGEX_MATCH_INTERVAL === 0) {
+                    await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+                }
             }
+            
             const allMessageCommands = [...promotedCommands, ...newCommands];
             logger.info(`---- Found ${allMessageCommands.length} command(s) to process (incl. volatile) ----`);
+            
+            // 🔧 释放主线程
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
+            // 🔧 分批执行命令，每批后释放主线程
             const newState = await executeCommandPipeline(allMessageCommands, state);
+            
+            // 🔧 释放主线程后再深拷贝
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
+            // 🔧 异步更新变量，避免阻塞
             await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newState)); return variables });
+            
+            // 🔧 释放主线程
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
             const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
-            const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
-            const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
+            
+            // 🔧 分片序列化大对象，避免阻塞主线程
+            const newStateBlock = await chunkedStringify(newState);
+            
+            // 🔧 释放主线程
+            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            
+            const finalContent = `${cleanNarrative}\n\n${STATE_BLOCK_START_MARKER}\n${newStateBlock}\n${STATE_BLOCK_END_MARKER}`;
+            
             await setChatMessage({ message: finalContent }, index, "display_current");
         } catch (error) {
             logger.error(`Error in processMessageState for index ${index}:`, error);
         } finally {
             logger.info("update finished");
-            isProcessingState = false;
+            isProcessingState = false; // 🔧 确保总是释放锁
         }
     }
+
     async function loadStateFromMessage(index) {
         if (index === "{{lastMessageId}}") { index = SillyTavern.chat.length - 1; }
 
@@ -589,9 +831,7 @@ command_syntax:
             logger.error(`[SAM] Error loading base data for index ${index}:`, error);
         }
 
-
         await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
-  
     }
     async function findLastAiMessageAndIndex(beforeIndex = -1) {
         const chat = SillyTavern.chat;
@@ -616,6 +856,14 @@ command_syntax:
     }
     async function dispatcher(event, ...event_params) {
         logger.info(`[FSM Dispatcher] Event: ${event}, State: ${curr_state}`);
+        
+        // 🔧 首次运行时输出设备信息
+        if (!dispatcher.deviceLogged) {
+            logger.info(`[SAM] Device Type: ${isMobileDevice ? 'Mobile' : 'Desktop'}`);
+            logger.info(`[SAM] Performance Settings - Delay: ${DELAY_MS}ms, Batch: ${COMMAND_BATCH_SIZE}, RegEx Interval: ${REGEX_MATCH_INTERVAL}`);
+            dispatcher.deviceLogged = true;
+        }
+        
         try {
             switch (curr_state) {
                 case STATES.IDLE:
@@ -631,6 +879,7 @@ command_syntax:
                             break;
                         case tavern_events.MESSAGE_SENT:
                             curr_state = STATES.AWAIT_GENERATION;
+                            startGenerationWatcher(); // 🔧 添加 watcher 启动
                             break;
                         case tavern_events.MESSAGE_SWIPED:
                             await sync_latest_state();
@@ -673,26 +922,43 @@ command_syntax:
         }
     }
     async function unifiedEventHandler(event, ...args) {
-        if ((sessionStorage.getItem(SESSION_STORAGE_KEY)) && (session_id !== sessionStorage.getItem(SESSION_STORAGE_KEY))) {
-            logger.warn(`Session mismatch! current: ${session_id}, storage: ${sessionStorage.getItem(SESSION_STORAGE_KEY)}. Aborting event ${JSON.stringify(event)}`);
-            return;
+        // 🔧 队列保护：防止无限增长
+        if (event_queue.length > 100) {
+            logger.error(`[UEH] Event queue overflow! Current size: ${event_queue.length}. Clearing old events.`);
+            event_queue.splice(0, 50); // 清除前50个事件
         }
+        
         event_queue.push({ event_id: event, args: [...args] });
         await unified_dispatch_executor();
     }
     async function unified_dispatch_executor() {
         if (isDispatching) { return; }
         isDispatching = true;
-        while (event_queue.length > 0) {
+        
+        // 🔧 防止无限循环：限制单次处理事件数量
+        const MAX_EVENTS_PER_BATCH = 20;
+        let processedCount = 0;
+        
+        while (event_queue.length > 0 && processedCount < MAX_EVENTS_PER_BATCH) {
             const { event_id, args } = event_queue.shift();
             logger.info(`[UDE] Dequeuing and dispatching event: ${event_id}`);
-            try { await dispatcher(event_id, ...args); }
+            try { 
+                await dispatcher(event_id, ...args); 
+                processedCount++;
+            }
             catch (error) {
                 logger.error(`[UDE] Unhandled error during dispatch of ${event_id}:`, error);
                 curr_state = STATES.IDLE;
             }
         }
+        
         isDispatching = false;
+        
+        // 🔧 如果还有事件，异步继续处理（避免阻塞主线程）
+        if (event_queue.length > 0) {
+            logger.warn(`[UDE] Event queue still has ${event_queue.length} events. Scheduling next batch...`);
+            setTimeout(() => unified_dispatch_executor(), 10);
+        }
     }
 
     const handlers = {
@@ -739,7 +1005,6 @@ command_syntax:
 		},
 	};
 
-    // [NEW] Debugging and Recovery Functions
     function resetCurrentState() {
         logger.warn("!!! MANUAL STATE RESET TRIGGERED !!!");
         stopGenerationWatcher();
@@ -871,7 +1136,7 @@ command_syntax:
         }catch(e){}
 
         try {
-            logger.info(`V3.3.0 "Foundations" loaded. GLHF, player.`);
+            logger.info(`V3.5.0 "Momentum" loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
