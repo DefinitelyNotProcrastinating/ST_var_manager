@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.5.0 "Momentum"
+// == Version: 3.5.1 "Momentum"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -10,6 +10,8 @@
 // == It also includes a sandboxed EVAL command for user-defined functions,
 // == now with support for execution ordering and periodic execution.
 // == It now features a comprehensive logging system and recovery tools.
+// == [NEW in 3.5.1] Adds a global API function, SAM_get_state(), to allow
+// == other scripts to access the current, live state object.
 // == [NEW in 3.5.0] Major performance overhaul: Asynchronous, non-blocking
 // == processing to eliminate UI stuttering on low-power devices.
 // == [NEW in 3.4.0] Adds a structured, stateful event tracking system to manage
@@ -264,17 +266,26 @@ command_syntax:
 
     const cleanupPreviousInstance = () => {
         const oldHandlers = window[HANDLER_STORAGE_KEY];
-        if (!oldHandlers) { logger.info("No previous instance found. Starting fresh."); return; }
-        logger.info("Found a previous instance. Removing its event listeners to prevent duplicates.");
-        eventRemoveListener(tavern_events.GENERATION_STARTED, oldHandlers.handleGenerationStarted);
-        eventRemoveListener(tavern_events.GENERATION_ENDED, oldHandlers.handleGenerationEnded);
-        eventRemoveListener(tavern_events.MESSAGE_SWIPED, oldHandlers.handleMessageSwiped);
-        eventRemoveListener(tavern_events.MESSAGE_DELETED, oldHandlers.handleMessageDeleted);
-        eventRemoveListener(tavern_events.MESSAGE_EDITED, oldHandlers.handleMessageEdited);
-        eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
-        eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
-        eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
-        delete window[HANDLER_STORAGE_KEY];
+        if (oldHandlers) {
+            logger.info("Found a previous instance. Removing its event listeners to prevent duplicates.");
+            eventRemoveListener(tavern_events.GENERATION_STARTED, oldHandlers.handleGenerationStarted);
+            eventRemoveListener(tavern_events.GENERATION_ENDED, oldHandlers.handleGenerationEnded);
+            eventRemoveListener(tavern_events.MESSAGE_SWIPED, oldHandlers.handleMessageSwiped);
+            eventRemoveListener(tavern_events.MESSAGE_DELETED, oldHandlers.handleMessageDeleted);
+            eventRemoveListener(tavern_events.MESSAGE_EDITED, oldHandlers.handleMessageEdited);
+            eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
+            eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
+            eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
+            delete window[HANDLER_STORAGE_KEY];
+        } else {
+             logger.info("No previous handler instance found. Starting fresh.");
+        }
+        
+        // Clean up the global API function from any previous instance
+        if (window.SAM_get_state) {
+            logger.info("Removing previous SAM_get_state API function.");
+            delete window.SAM_get_state;
+        }
     };
 
     // --- HELPER FUNCTIONS ---
@@ -451,6 +462,34 @@ command_syntax:
         }
     }
 
+    // --- EXPORTED API ---
+    /**
+     * @async
+     * @description Provides a safe, read-only copy of the current SAM state object.
+     * This allows other scripts to access the state without the risk of direct modification.
+     * @returns {Promise<object>} A promise that resolves to a deep copy of the current state object.
+     */
+    async function SAM_get_state() {
+        try {
+            logger.info("API call: SAM_get_state() was invoked.");
+            const variables = await getVariables();
+            const currentState = _.get(variables, "SAM_data");
+
+            if (currentState) {
+                // Use the existing optimized copy function to return a safe snapshot
+                return goodCopy(currentState);
+            } else {
+                logger.warn("API call: SAM_get_state() found no state in variables. Returning initial state.");
+                // Return a copy of the default initial state if none is found
+                return _.cloneDeep(INITIAL_STATE);
+            }
+        } catch (error) {
+            logger.error("API call: SAM_get_state() failed.", error);
+            // Return a safe fallback value in case of an error
+            return _.cloneDeep(INITIAL_STATE);
+        }
+    }
+
     // --- CORE LOGIC ---
     async function processVolatileUpdates(state) {
         if (!state.volatile || !state.volatile.length) return [];
@@ -547,6 +586,7 @@ command_syntax:
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) {
                             logger.warn(`[SAM] SELECT_ADD failed: Path "${listPath}" is not a list.`);
+                            toastr.warning(`SAM SELECT_ADD: Path "${listPath}" is not a list.`);
                             break;
                         }
                         const targetIndex = _.findIndex(list, { [selProp]: selVal });
@@ -561,6 +601,7 @@ command_syntax:
                             }
                         } else {
                             logger.warn(`[SAM] SELECT_ADD failed: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
+                            toastr.warning(`SAM SELECT_ADD: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
                         break;
                     }
@@ -569,6 +610,7 @@ command_syntax:
                         const list = _.get(state.static, listPath);
                         if (!Array.isArray(list)) {
                             logger.warn(`[SAM] SELECT_SET failed: Path "${listPath}" is not a list.`);
+                            toastr.warning(`SAM SELECT_SET: Path "${listPath}" is not a list.`);
                             break;
                         }
                         const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) === selVal);
@@ -578,6 +620,7 @@ command_syntax:
                             _.set(state.static, fullPath, valToSet);
                             
                         } else {
+                            toastr.warning(`SAM SELECT_SET: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                             logger.warn(`[SAM] SELECT_SET failed to find object: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
                         }
                         break;
@@ -1093,6 +1136,11 @@ command_syntax:
 
     $(() => {
         cleanupPreviousInstance();
+        
+        // Export the API function to the global scope
+        window.SAM_get_state = SAM_get_state;
+        logger.info("SAM API function 'SAM_get_state' is now available globally.");
+
         const initializeOrReloadStateForCurrentChat = async () => {
             logger.info("Initializing or reloading state for current chat.");
             const lastAiIndex = await findLastAiMessageAndIndex();
@@ -1136,7 +1184,7 @@ command_syntax:
         }catch(e){}
 
         try {
-            logger.info(`V3.5.0 "Momentum" loaded. GLHF, player.`);
+            logger.info(`V3.5.1 "Momentum" loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
