@@ -218,8 +218,10 @@ command_syntax:
 (function () {
     // --- CONFIGURATION ---
     const SCRIPT_NAME = "Situational Awareness Manager";
-    const STATE_BLOCK_START_MARKER = '<!--<|state|>';
-    const STATE_BLOCK_END_MARKER = '</|state|>-->';
+    //const STATE_BLOCK_START_MARKER = '<!--<|state|>';
+    //const STATE_BLOCK_END_MARKER = '</|state|>-->';
+	const STATE_BLOCK_START_MARKER = '######SAM_DATA######'; // much more visible values. This is not going to be deleted by a tag fixing script.
+    const STATE_BLOCK_END_MARKER = '$$$$$$SAM_DATA$$$$$$';
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
     const COMMAND_REGEX = /^\s*@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVENT_BEGIN|EVENT_END|EVENT_ADD_PROC|EVENT_ADD_DEFN|EVENT_ADD_MEMBER|EVENT_SUMMARY|EVAL)\b\s*\((.*)\)\s*;?\s*$/gim;
