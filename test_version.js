@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.5.1 "Momentum"
+// == Version: 3.6.0 "Resilience"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -10,8 +10,9 @@
 // == It also includes a sandboxed EVAL command for user-defined functions,
 // == now with support for execution ordering and periodic execution.
 // == It now features a comprehensive logging system and recovery tools.
-// == [NEW in 3.5.1] Adds a global API function, SAM_get_state(), to allow
-// == other scripts to access the current, live state object.
+// == [NEW in 3.6.0] Adds a new, more robust state block format `$$$$$$data_block...`
+// == [NEW in 3.6.0] Adds `uniquely_identified` flag to allow abbreviated paths in commands.
+// == [NEW in 3.6.0] Adds `disable_dtype_mutation` flag to prevent AI from changing variable types.
 // == [NEW in 3.5.0] Major performance overhaul: Asynchronous, non-blocking
 // == processing to eliminate UI stuttering on low-power devices.
 // == [NEW in 3.4.0] Adds a structured, stateful event tracking system to manage
@@ -218,14 +219,23 @@ command_syntax:
 (function () {
     // --- CONFIGURATION ---
     const SCRIPT_NAME = "Situational Awareness Manager";
-    //const STATE_BLOCK_START_MARKER = '<!--<|state|>';
-    //const STATE_BLOCK_END_MARKER = '</|state|>-->';
-	const STATE_BLOCK_START_MARKER = '######SAM_DATA######'; // much more visible values. This is not going to be deleted by a tag fixing script.
-    const STATE_BLOCK_END_MARKER = '$$$$$$SAM_DATA$$$$$$';
-    const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
-    const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
+
+    // NEW: Define both old and new state block formats for robust parsing
+    const OLD_START_MARKER = '<!--<|state|>';
+    const OLD_END_MARKER = '</|state|>-->';
+    const NEW_START_MARKER = '$$$$$$data_block$$$$$$';
+    const NEW_END_MARKER = '$$$$$$data_block_end$$$$$$';
+
+    // NEW: Use the new, more robust format for writing state blocks
+    const STATE_BLOCK_START_MARKER = NEW_START_MARKER;
+    const STATE_BLOCK_END_MARKER = NEW_END_MARKER;
+
+    // NEW: Regexes now match EITHER format for parsing and removing
+    const STATE_BLOCK_PARSE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*([\\s\\S]*?)\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 's');
+    const STATE_BLOCK_REMOVE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*[\\s\\S]*?\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 'sg');
+
     const COMMAND_REGEX = /^\s*@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVENT_BEGIN|EVENT_END|EVENT_ADD_PROC|EVENT_ADD_DEFN|EVENT_ADD_MEMBER|EVENT_SUMMARY|EVAL)\b\s*\((.*)\)\s*;?\s*$/gim;
-    const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: [], func: [], events: [], event_counter: 0 };
+    const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: [], func: [], events: [], event_counter: 0, uniquely_identified: false, disable_dtype_mutation: false };
 
     // 🔧 手机端性能优化：检测设备类型并自动调整参数
     const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
@@ -268,26 +278,17 @@ command_syntax:
 
     const cleanupPreviousInstance = () => {
         const oldHandlers = window[HANDLER_STORAGE_KEY];
-        if (oldHandlers) {
-            logger.info("Found a previous instance. Removing its event listeners to prevent duplicates.");
-            eventRemoveListener(tavern_events.GENERATION_STARTED, oldHandlers.handleGenerationStarted);
-            eventRemoveListener(tavern_events.GENERATION_ENDED, oldHandlers.handleGenerationEnded);
-            eventRemoveListener(tavern_events.MESSAGE_SWIPED, oldHandlers.handleMessageSwiped);
-            eventRemoveListener(tavern_events.MESSAGE_DELETED, oldHandlers.handleMessageDeleted);
-            eventRemoveListener(tavern_events.MESSAGE_EDITED, oldHandlers.handleMessageEdited);
-            eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
-            eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
-            eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
-            delete window[HANDLER_STORAGE_KEY];
-        } else {
-             logger.info("No previous handler instance found. Starting fresh.");
-        }
-        
-        // Clean up the global API function from any previous instance
-        if (window.SAM_get_state) {
-            logger.info("Removing previous SAM_get_state API function.");
-            delete window.SAM_get_state;
-        }
+        if (!oldHandlers) { logger.info("No previous instance found. Starting fresh."); return; }
+        logger.info("Found a previous instance. Removing its event listeners to prevent duplicates.");
+        eventRemoveListener(tavern_events.GENERATION_STARTED, oldHandlers.handleGenerationStarted);
+        eventRemoveListener(tavern_events.GENERATION_ENDED, oldHandlers.handleGenerationEnded);
+        eventRemoveListener(tavern_events.MESSAGE_SWIPED, oldHandlers.handleMessageSwiped);
+        eventRemoveListener(tavern_events.MESSAGE_DELETED, oldHandlers.handleMessageDeleted);
+        eventRemoveListener(tavern_events.MESSAGE_EDITED, oldHandlers.handleMessageEdited);
+        eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
+        eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
+        eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
+        delete window[HANDLER_STORAGE_KEY];
     };
 
     // --- HELPER FUNCTIONS ---
@@ -335,7 +336,18 @@ command_syntax:
         if (match && match[1]) {
             try {
                 const parsed = JSON.parse(match[1].trim());
-                return { static: parsed.static ?? {}, time: parsed.time ?? "", volatile: parsed.volatile ?? [], responseSummary: parsed.responseSummary ?? [], func: parsed.func ?? [], events: parsed.events ?? [], event_counter: parsed.event_counter ?? 0 };
+                // NEW: Ensure new flags are present, defaulting to false.
+                return { 
+                    static: parsed.static ?? {}, 
+                    time: parsed.time ?? "", 
+                    volatile: parsed.volatile ?? [], 
+                    responseSummary: parsed.responseSummary ?? [], 
+                    func: parsed.func ?? [], 
+                    events: parsed.events ?? [], 
+                    event_counter: parsed.event_counter ?? 0,
+                    uniquely_identified: parsed.uniquely_identified ?? false,
+                    disable_dtype_mutation: parsed.disable_dtype_mutation ?? false
+                };
             } catch (error) {
                 logger.error("Failed to parse state JSON.", error);
                 return _.cloneDeep(INITIAL_STATE);
@@ -464,34 +476,6 @@ command_syntax:
         }
     }
 
-    // --- EXPORTED API ---
-    /**
-     * @async
-     * @description Provides a safe, read-only copy of the current SAM state object.
-     * This allows other scripts to access the state without the risk of direct modification.
-     * @returns {Promise<object>} A promise that resolves to a deep copy of the current state object.
-     */
-    async function SAM_get_state() {
-        try {
-            logger.info("API call: SAM_get_state() was invoked.");
-            const variables = await getVariables();
-            const currentState = _.get(variables, "SAM_data");
-
-            if (currentState) {
-                // Use the existing optimized copy function to return a safe snapshot
-                return goodCopy(currentState);
-            } else {
-                logger.warn("API call: SAM_get_state() found no state in variables. Returning initial state.");
-                // Return a copy of the default initial state if none is found
-                return _.cloneDeep(INITIAL_STATE);
-            }
-        } catch (error) {
-            logger.error("API call: SAM_get_state() failed.", error);
-            // Return a safe fallback value in case of an error
-            return _.cloneDeep(INITIAL_STATE);
-        }
-    }
-
     // --- CORE LOGIC ---
     async function processVolatileUpdates(state) {
         if (!state.volatile || !state.volatile.length) return [];
@@ -512,11 +496,57 @@ command_syntax:
         state.volatile = remainingVolatiles;
         return promotedCommands;
     }
+
+    // NEW: Helper function to build a map of unique keys to full paths
+    function buildPathMap(obj, currentPath = '', pathMap = new Map(), collisionSet = new Set()) {
+        if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return;
+
+        for (const key of Object.keys(obj)) {
+            const newPath = currentPath ? `${currentPath}.${key}` : key;
+            if (pathMap.has(key)) {
+                collisionSet.add(key);
+            } else {
+                pathMap.set(key, newPath);
+            }
+            buildPathMap(obj[key], newPath, pathMap, collisionSet);
+        }
+        return { pathMap, collisionSet };
+    }
+    
+    // NEW: Helper function to check for illegal data type mutations
+    function isTypeMutationAllowed(oldValue, newValue) {
+        if (oldValue === null || typeof oldValue === 'undefined') {
+            return true; // Always allow setting a value if it's currently null or undefined
+        }
+        const oldType = Array.isArray(oldValue) ? 'array' : typeof oldValue;
+        const newType = Array.isArray(newValue) ? 'array' : typeof newValue;
+        return oldType === newType;
+    }
+
     async function applyCommandsToState(commands, state) {
         if (!commands || commands.length === 0) return state;
         const currentRound = await getRoundCounter();
         let modifiedListPaths = new Set();
         
+        // NEW: Abbreviation mapping logic
+        let pathMap = null;
+        if (state.uniquely_identified) {
+            const { pathMap: generatedMap, collisionSet } = buildPathMap(state.static);
+            for (const key of collisionSet) {
+                generatedMap.delete(key);
+            }
+            pathMap = generatedMap;
+            if (collisionSet.size > 0) {
+                logger.warn(`[SAM] Abbreviation mapping disabled for colliding keys: ${[...collisionSet].join(', ')}`);
+                toastr.warning(`SAM: Abbreviation mapping disabled for non-unique keys: ${[...collisionSet].join(', ')}`);
+            } else {
+                logger.info("[SAM] Abbreviation mapping enabled for all unique keys.");
+            }
+        }
+        
+        // Helper to resolve abbreviated paths
+        const resolvePath = (path) => pathMap?.get(path) ?? path;
+
         // 🔧 使用动态批次大小，自动适配设备性能
         for (let i = 0; i < commands.length; i++) {
             const command = commands[i];
@@ -535,8 +565,30 @@ command_syntax:
                 continue;
             }
             try {
+                // NEW: Resolve path for commands that use it as the first parameter
+                const pathCommands = ['SET', 'ADD', 'DEL', 'SELECT_DEL', 'SELECT_ADD', 'SELECT_SET', 'TIMED_SET'];
+                if (pathCommands.includes(command.type) && params.length > 0 && typeof params[0] === 'string') {
+                    const originalPath = params[0];
+                    params[0] = resolvePath(originalPath);
+                    if (originalPath !== params[0]) {
+                        logger.info(`[SAM] Abbreviation resolved: '${originalPath}' -> '${params[0]}'`);
+                    }
+                }
+
                 switch (command.type) {
-                    case 'SET': { _.set(state.static, params[0], params[1]); break; }
+                    case 'SET': { 
+                        // NEW: Type mutation check
+                        if (state.disable_dtype_mutation) {
+                            const oldValue = _.get(state.static, params[0]);
+                            if (!isTypeMutationAllowed(oldValue, params[1])) {
+                                logger.warn(`[SAM] Blocked illegal type mutation for path "${params[0]}".`);
+                                toastr.warning(`SAM: Blocked illegal type mutation on "${params[0]}".`);
+                                continue;
+                            }
+                        }
+                        _.set(state.static, params[0], params[1]); 
+                        break; 
+                    }
                     case 'ADD': {
                         const [varName, valueToAdd] = params;
                         const existing = _.get(state.static, varName, 0);
@@ -557,6 +609,15 @@ command_syntax:
                     }
                     case 'TIMED_SET': {
                         const [varName, varValue, reason, isRealTime, timepoint] = params;
+                         // NEW: Type mutation check
+                        if (state.disable_dtype_mutation) {
+                            const oldValue = _.get(state.static, varName);
+                            if (!isTypeMutationAllowed(oldValue, varValue)) {
+                                logger.warn(`[SAM] Blocked scheduling of illegal type mutation for path "${varName}".`);
+                                toastr.warning(`SAM: Blocked timed set due to illegal type mutation on "${varName}".`);
+                                continue;
+                            }
+                        }
                         const targetTime = isRealTime ? new Date(timepoint).toISOString() : currentRound + Number(timepoint);
                         if (!state.volatile) state.volatile = [];
                         state.volatile.push([varName, varValue, isRealTime, targetTime, reason]);
@@ -596,7 +657,7 @@ command_syntax:
                             const fullPath = `${listPath}[${targetIndex}].${recProp}`;
                             const existing = _.get(state.static, fullPath);
                             if (Array.isArray(existing)) {
-                                existing.push(valToAdd); // Must get reference and push for arrays
+                                existing.push(valToAdd);
                             } else {
                                 const newValue = (Number(existing) || 0) + Number(valToAdd);
                                 _.set(state.static, fullPath, newValue);
@@ -619,6 +680,15 @@ command_syntax:
 
                         if (targetIndex > -1) {
                             const fullPath = `${listPath}[${targetIndex}].${recProp}`;
+                             // NEW: Type mutation check
+                            if (state.disable_dtype_mutation) {
+                                const oldValue = _.get(state.static, fullPath);
+                                if (!isTypeMutationAllowed(oldValue, valToSet)) {
+                                    logger.warn(`[SAM] Blocked illegal type mutation for path "${fullPath}".`);
+                                    toastr.warning(`SAM: Blocked illegal type mutation on "${fullPath}".`);
+                                    continue;
+                                }
+                            }
                             _.set(state.static, fullPath, valToSet);
                             
                         } else {
@@ -893,7 +963,8 @@ command_syntax:
     async function checkStuckState() {
         const lastMessage = SillyTavern.chat[SillyTavern.chat.length - 1];
         if (!lastMessage || lastMessage.is_user) return; // Not an AI message, nothing to check
-        if (!lastMessage.mes.includes(STATE_BLOCK_START_MARKER)) {
+        const match = lastMessage.mes.match(STATE_BLOCK_PARSE_REGEX);
+        if (!match) {
             const warningMsg = "Stuck State Detected: The last AI message is missing its state block. The next turn will use the previous state. This may cause inconsistencies. Consider using the 'Reset State' or 'Rerun Commands' debug buttons if issues persist.";
             logger.error(`STUCK STATE DETECTED! Message at index ${SillyTavern.chat.length - 1} did not contain a state block after processing. please RESET the current state and MANUALLY update the variables.`);
             toastr.error(warningMsg);
@@ -1138,11 +1209,6 @@ command_syntax:
 
     $(() => {
         cleanupPreviousInstance();
-        
-        // Export the API function to the global scope
-        window.SAM_get_state = SAM_get_state;
-        logger.info("SAM API function 'SAM_get_state' is now available globally.");
-
         const initializeOrReloadStateForCurrentChat = async () => {
             logger.info("Initializing or reloading state for current chat.");
             const lastAiIndex = await findLastAiMessageAndIndex();
@@ -1186,7 +1252,7 @@ command_syntax:
         }catch(e){}
 
         try {
-            logger.info(`V3.5.1 "Momentum" loaded. GLHF, player.`);
+            logger.info(`V3.6.0 "Resilience" loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
