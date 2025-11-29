@@ -647,7 +647,7 @@ command_syntax:
                     // Attempt to repair the wrapped array string
                     const fixed = window.jsonrepair(wrappedString);
                     params = JSON.parse(fixed);
-                    
+                    toastr.info(`[SAM] JSON input format incorrect. Attempting to repair JSON`);
                     logger.info(`[SAM] JSON repaired successfully.`);
                     if(paramsString.length > 50) {
                         logger.info(`[SAM] Repaired Content: ${fixed}`);
