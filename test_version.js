@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager
-// == Version: 3.6.0 "Resilience"
+// == Version: 3.7.0 "Antifragile"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It correctly maintains a nested state object and passes it to the UI
@@ -10,6 +10,11 @@
 // == It also includes a sandboxed EVAL command for user-defined functions,
 // == now with support for execution ordering and periodic execution.
 // == It now features a comprehensive logging system and recovery tools.
+// == [NEW in 3.7.0] Adds AUTO-REPAIR for broken JSON arguments.
+// == If the AI writes invalid JSON, the script dynamically imports a repair
+// == library (jsonrepair), fixes the syntax, and executes the command.
+// == [NEW in 3.6.1] Adds native support for MULTILINE commands. 
+// == Arguments can now span multiple lines or contain newlines.
 // == [NEW in 3.6.0] Adds a new, more robust state block format `$$$$$$data_block...`
 // == [NEW in 3.6.0] Adds `uniquely_identified` flag to allow abbreviated paths in commands.
 // == [NEW in 3.6.0] Adds `disable_dtype_mutation` flag to prevent AI from changing variable types.
@@ -219,6 +224,7 @@ command_syntax:
 (function () {
     // --- CONFIGURATION ---
     const SCRIPT_NAME = "Situational Awareness Manager";
+    const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
 
     // NEW: Define both old and new state block formats for robust parsing
     const OLD_START_MARKER = '<!--<|state|>';
@@ -234,7 +240,8 @@ command_syntax:
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*([\\s\\S]*?)\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*[\\s\\S]*?\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 'sg');
 
-    const COMMAND_REGEX = /^\s*@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVENT_BEGIN|EVENT_END|EVENT_ADD_PROC|EVENT_ADD_DEFN|EVENT_ADD_MEMBER|EVENT_SUMMARY|EVAL)\b\s*\((.*)\)\s*;?\s*$/gim;
+    // V3.6.1: Modified regex to only detect the START of a command. We handle the rest with a stateful parser to support multiline.
+    const COMMAND_START_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVENT_BEGIN|EVENT_END|EVENT_ADD_PROC|EVENT_ADD_DEFN|EVENT_ADD_MEMBER|EVENT_SUMMARY|EVAL)\b\s*\(/gim;
     const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: [], func: [], events: [], event_counter: 0, uniquely_identified: false, disable_dtype_mutation: false };
 
     // 🔧 手机端性能优化：检测设备类型并自动调整参数
@@ -292,6 +299,71 @@ command_syntax:
     };
 
     // --- HELPER FUNCTIONS ---
+    // V3.7.0: Dynamic Loader for Repair Library
+    async function loadExternalLibrary(url, globalName) {
+        if (window[globalName]) return;
+        logger.info(`[SAM] Downloading external library: ${globalName}...`);
+        return new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = url;
+            script.onload = () => {
+                logger.info(`[SAM] Library ${globalName} loaded successfully.`);
+                resolve();
+            };
+            script.onerror = () => {
+                const err = new Error(`Failed to load script: ${url}`);
+                logger.error(err);
+                reject(err);
+            };
+            document.head.appendChild(script);
+        });
+    }
+
+    // V3.6.1: Multiline-safe parser helper
+    function extractBalancedParams(text, startIndex) {
+        let depth = 1;
+        let inString = false;
+        let quoteChar = '';
+        let i = startIndex;
+        const len = text.length;
+        
+        while (i < len && depth > 0) {
+            const c = text[i];
+            
+            if (inString) {
+                if (c === quoteChar) {
+                    let backslashCount = 0;
+                    let j = i - 1;
+                    while (j >= startIndex && text[j] === '\\') {
+                        backslashCount++;
+                        j--;
+                    }
+                    if (backslashCount % 2 === 0) {
+                        inString = false;
+                    }
+                }
+            } else {
+                if (c === '"' || c === "'" || c === '`') {
+                    inString = true;
+                    quoteChar = c;
+                } else if (c === '(') {
+                    depth++;
+                } else if (c === ')') {
+                    depth--;
+                }
+            }
+            i++;
+        }
+        
+        if (depth === 0) {
+            return {
+                params: text.substring(startIndex, i - 1),
+                endIndex: i
+            };
+        }
+        return null;
+    }
+
     function stopGenerationWatcher() {
         if (generationWatcherId) {
             logger.info('[SAM Watcher] Stopping generation watcher.');
@@ -557,13 +629,36 @@ command_syntax:
             }
             
             let params;
+            // V3.7.0: Updated Parameter Parsing with Auto-Recovery
+            const paramsString = command.params.trim();
+            const wrappedString = `[${paramsString}]`;
+
             try {
-                const paramsString = command.params.trim();
-                params = paramsString ? JSON.parse(`[${paramsString}]`) : [];
+                // Try standard parse first
+                params = paramsString ? JSON.parse(wrappedString) : [];
             } catch (error) {
-                logger.error(`Failed to parse parameters for command ${command.type}. Params: "${command.params}"`, error);
-                continue;
+                logger.warn(`[SAM] JSON parse failed for command ${command.type}. Attempting repair via jsonrepair...`);
+                try {
+                    // Check if library is loaded, if not, load it
+                    if (typeof window.jsonrepair !== 'function') {
+                        await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                    }
+                    
+                    // Attempt to repair the wrapped array string
+                    const fixed = window.jsonrepair(wrappedString);
+                    params = JSON.parse(fixed);
+                    
+                    logger.info(`[SAM] JSON repaired successfully.`);
+                    if(paramsString.length > 50) {
+                        logger.info(`[SAM] Repaired Content: ${fixed}`);
+                    }
+                } catch (repairError) {
+                    logger.error(`[SAM] Fatal: Failed to repair JSON for command ${command.type}. Skipping.`, repairError);
+                    toastr.error(`SAM: Failed to parse/repair command ${command.type}.`);
+                    continue; // Skip this command
+                }
             }
+
             try {
                 // NEW: Resolve path for commands that use it as the first parameter
                 const pathCommands = ['SET', 'ADD', 'DEL', 'SELECT_DEL', 'SELECT_ADD', 'SELECT_SET', 'TIMED_SET'];
@@ -860,14 +955,33 @@ command_syntax:
             // 🔧 释放主线程后再进行正则匹配
             await new Promise(resolve => setTimeout(resolve, DELAY_MS));
             
-            COMMAND_REGEX.lastIndex = 0;
+            COMMAND_START_REGEX.lastIndex = 0;
             let match;
             const newCommands = [];
             
             // 🔧 手机端优化：分批处理正则匹配，避免长文本卡死
             let matchCount = 0;
-            while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
-                newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
+            
+            // V3.6.1: New Parsing Loop for Multiline Support
+            while ((match = COMMAND_START_REGEX.exec(messageContent)) !== null) {
+                const commandType = match[1].toUpperCase();
+                // match[0] contains "@.CMD("
+                // The parameters start immediately after match[0]
+                const openParenIndex = match.index + match[0].length;
+                
+                // Use the parser to find the balancing closing paren
+                const extraction = extractBalancedParams(messageContent, openParenIndex);
+                
+                if (extraction) {
+                    newCommands.push({ type: commandType, params: extraction.params.trim() });
+                    
+                    // Manually advance the regex index to the end of this command block
+                    // to prevent spurious matches inside string arguments.
+                    COMMAND_START_REGEX.lastIndex = extraction.endIndex;
+                } else {
+                    logger.warn(`[SAM] Malformed command or unbalanced parentheses for ${commandType} at index ${match.index}. Skipping.`);
+                }
+
                 matchCount++;
                 // 🔧 根据设备类型动态调整释放频率
                 if (matchCount % REGEX_MATCH_INTERVAL === 0) {
@@ -1161,12 +1275,22 @@ command_syntax:
 
             const messageToRerun = SillyTavern.chat[lastAiIndex];
             const messageContent = messageToRerun.mes;
-            COMMAND_REGEX.lastIndex = 0;
+            
+            // V3.6.1: Updated Manual Rerun to use new parser
+            COMMAND_START_REGEX.lastIndex = 0;
             let match;
             const newCommands = [];
-            while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
-                newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
+            while ((match = COMMAND_START_REGEX.exec(messageContent)) !== null) {
+                const commandType = match[1].toUpperCase();
+                const openParenIndex = match.index + match[0].length;
+                const extraction = extractBalancedParams(messageContent, openParenIndex);
+                
+                if (extraction) {
+                    newCommands.push({ type: commandType, params: extraction.params.trim() });
+                    COMMAND_START_REGEX.lastIndex = extraction.endIndex;
+                }
             }
+
             logger.info(`Found ${newCommands.length} command(s) in message ${lastAiIndex} to rerun.`);
             const newState = await executeCommandPipeline(newCommands, initialState);
             await updateVariablesWith(variables => {
@@ -1252,7 +1376,7 @@ command_syntax:
         }catch(e){}
 
         try {
-            logger.info(`V3.6.0 "Resilience" loaded. GLHF, player.`);
+            logger.info(`V3.7.0 "Antifragile" loaded. GLHF, player.`);
             initializeOrReloadStateForCurrentChat();
             session_id = JSON.stringify(new Date());
             sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
