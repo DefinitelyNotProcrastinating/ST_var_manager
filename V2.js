@@ -1,12 +1,9 @@
 // ============================================================================
 // == Situational Awareness Manager (SAM)
-// == Version: 4.0.0 "Lepton"
+// == Version: 4.1.0 "Lepton+"
 // ==
-// == Refactored for O(N) space efficiency and O(N) time efficiency via SillyTavern Native Macros. I never thought I have to trade time for space.
-// ==
-// == This script listens for AI commands, calculates the result based on
-// == current variables, and injects a SillyTavern-compatible {{setvar}}
-// == macro back into the message.
+// == Refactored for O(N) space efficiency and O(N) time efficiency via SillyTavern Native Macros.
+// == Added: Support for direct function calls (e.g., @.MyFunc(1,2) instead of @.EVAL("MyFunc", 1,2))
 // ==
 // == REQUIRES SILLYTAVERN REGEX:
 // == Replace: /@\.<setvar::(.*?)::(.*?)>\.@/g
@@ -15,11 +12,21 @@
 
 (function () {
     // --- CONFIGURATION ---
-    const SCRIPT_NAME = "SAM v4.0.0";
+    const SCRIPT_NAME = "SAM v4.1.0";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     
     // Command Parsing
-    const COMMAND_START_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVENT_BEGIN|EVENT_END|EVENT_ADD_PROC|EVENT_ADD_DEFN|EVENT_ADD_MEMBER|EVENT_SUMMARY|EVAL)\b\s*\(/gim;
+    // UPDATED: Captures any alphanumeric string after @. to allow custom function names
+    const COMMAND_START_REGEX = /@\.([a-zA-Z0-9_]+)\b\s*\(/gim;
+
+    // Standard Commands Allow-list (to distinguish from custom functions)
+    const STANDARD_COMMANDS = new Set([
+        "SET", "ADD", "DEL", "SELECT_ADD", "DICT_DEL", 
+        "SELECT_DEL", "SELECT_SET", "TIME", "TIMED_SET", 
+        "RESPONSE_SUMMARY", "CANCEL_SET", "EVENT_BEGIN", 
+        "EVENT_END", "EVENT_ADD_PROC", "EVENT_ADD_DEFN", 
+        "EVENT_ADD_MEMBER", "EVENT_SUMMARY", "EVAL"
+    ]);
 
     // Macro Formatting
     const MACRO_START = "@.<setvar::";
@@ -86,9 +93,7 @@
 
     // --- DATA HANDLING ---
 
-    // Retrieve all variables from SillyTavern's global store
     function getAllVariables() {
-        // Compatibility with various ST versions/extensions
         if (typeof SillyTavern.getContext === 'function') {
             const ctx = SillyTavern.getContext();
             if (ctx && ctx.variables) return ctx.variables;
@@ -96,25 +101,21 @@
         if (SillyTavern.extension_settings && SillyTavern.extension_settings.variables) {
             return SillyTavern.extension_settings.variables;
         }
-        // Fallback for older versions or if slash runner isn't syncing
         return window.variables || {}; 
     }
 
-    // Create the output string string: @.<setvar::name::json_value>.@
     function createSetVarString(rootKey, value) {
-        // We always stringify the value to handle objects/arrays/numbers correctly within the macro
         const jsonVal = JSON.stringify(value);
         return `${MACRO_START}${rootKey}${MACRO_SEP}${jsonVal}${MACRO_END}`;
     }
 
     // --- CORE LOGIC ---
 
-    // Check for timed events (VOLATILE) stored in SAM_volatile variable
     function processVolatileTimers(workingVars) {
         const volatileList = _.get(workingVars, 'SAM_volatile', []);
         if (!Array.isArray(volatileList) || volatileList.length === 0) return [];
 
-        const currentRound = SillyTavern.chat.length - 1; // Approx
+        const currentRound = SillyTavern.chat.length - 1; 
         const now = new Date();
         const remainingVolatiles = [];
         const triggeredCommands = [];
@@ -131,7 +132,6 @@
 
             if (triggered) {
                 logger.info(`[SAM] Timer triggered: Setting ${varName} to`, varValue);
-                // Create a synthetic command to executed immediately
                 const params = `${JSON.stringify(varName)}, ${JSON.stringify(varValue)}`;
                 triggeredCommands.push({ type: 'SET', params: params, isInternal: true });
             } else {
@@ -139,7 +139,6 @@
             }
         });
 
-        // Update the volatile list in working vars
         if (triggeredCommands.length > 0) {
             _.set(workingVars, 'SAM_volatile', remainingVolatiles);
         }
@@ -147,10 +146,14 @@
         return triggeredCommands;
     }
 
-    async function runSandboxedFunction(funcName, params, workingVars) {
-        // Function definitions are stored in SAM_func variable
-        const funcList = _.get(workingVars, 'SAM_func', []);
-        const funcDef = funcList.find(f => f.func_name === funcName);
+    // Updated: Accepts funcDef object directly or looks it up
+    async function runSandboxedFunction(funcName, params, workingVars, preFetchedFuncDef = null) {
+        let funcDef = preFetchedFuncDef;
+        
+        if (!funcDef) {
+            const funcList = _.get(workingVars, 'SAM_func', []);
+            funcDef = funcList.find(f => f.func_name === funcName);
+        }
         
         if (!funcDef) { logger.warn(`EVAL: Function '${funcName}' not found in SAM_func.`); return null; }
 
@@ -158,17 +161,12 @@
         
         return new Promise(async (resolve) => {
             try {
-                // We pass workingVars as 'state'. The function should return a delta object: { "path.to.var": newValue }
                 const bodyPrologue = `const args = Array.from(arguments);`;
                 const functionBody = `'use strict';\n${funcDef.func_body}`;
                 
-                // Construct the function
                 const userFunction = new Function('state', 'args', 'fetch', functionBody);
-                
-                // Mock fetch if no network access (security)
                 const fetchImpl = funcDef.network_access ? window.fetch.bind(window) : () => Promise.reject("Network disabled");
 
-                // Execute with timeout race
                 const result = await Promise.race([
                     Promise.resolve(userFunction(workingVars, params, fetchImpl)),
                     new Promise((_, r) => setTimeout(() => r(new Error("Timeout")), timeout))
@@ -195,25 +193,34 @@
             let hasChanges = false;
             let replacements = [];
 
-            // 1. Snapshot current variables (Deep Clone to handle sequential logic in O(1) read)
+            // 1. Snapshot variables
             let workingVars = _.cloneDeep(getAllVariables());
 
-            // 2. Process Volatile Timers first
+            // 2. Map Functions for O(1) Lookup during parsing
+            const funcList = _.get(workingVars, 'SAM_func', []);
+            const funcMap = new Map();
+            if (Array.isArray(funcList)) {
+                funcList.forEach(f => funcMap.set(f.func_name, f));
+            }
+
+            // 3. Process Volatile Timers
             const timerCommands = processVolatileTimers(workingVars);
             
-            // 3. Find Commands in Message
+            // 4. Find Commands in Message
             COMMAND_START_REGEX.lastIndex = 0;
             let match;
             const foundCommands = [];
 
             while ((match = COMMAND_START_REGEX.exec(content)) !== null) {
-                const commandType = match[1].toUpperCase();
+                // Determine Command Type (Standard or Custom Function Name)
+                // We keep case sensitivity for custom functions, but standard commands are traditionally CAPS
+                const rawType = match[1]; 
                 const openParenIndex = match.index + match[0].length;
                 const extraction = extractBalancedParams(content, openParenIndex);
                 
                 if (extraction) {
                     foundCommands.push({
-                        type: commandType,
+                        type: rawType, 
                         params: extraction.params.trim(),
                         start: match.index,
                         end: extraction.endIndex,
@@ -223,15 +230,11 @@
                 }
             }
 
-            // Combine Timer commands (executed virtually) and Message commands
-            // We append timer updates to the message content at the end
-            
             const allCommands = [...timerCommands, ...foundCommands];
 
-            // 4. Execute Logic on workingVars
+            // 5. Execute Logic on workingVars
             for (const cmd of allCommands) {
                 let params;
-                // Parse Parameters
                 try {
                     params = JSON.parse(`[${cmd.params}]`);
                 } catch (e) {
@@ -243,92 +246,114 @@
                     }
                 }
 
-                // Execute Logic
                 try {
-                    // Logic to update workingVars
-                    // We only generate a replacement string for the explicit message commands
-                    // For timer commands, we generate a setvar to append later
+                    let rootKeyToUpdate = null;
+                    const standardType = cmd.type.toUpperCase();
                     
-                    let rootKeyToUpdate = null; // The top-level key changed
-
-                    switch (cmd.type) {
-                        case 'SET':
-                            _.set(workingVars, params[0], params[1]);
-                            rootKeyToUpdate = params[0].split('.')[0];
-                            break;
-                        case 'ADD':
-                            {
-                                const [path, val] = params;
-                                const existing = _.get(workingVars, path, 0);
-                                if (Array.isArray(existing)) existing.push(val);
-                                else _.set(workingVars, path, Number(existing) + Number(val));
-                                rootKeyToUpdate = path.split('.')[0];
-                            }
-                            break;
-                        case 'DEL':
-                            {
-                                const [path, idx] = params;
-                                const list = _.get(workingVars, path);
-                                if (Array.isArray(list)) {
-                                    list.splice(idx, 1);
+                    // Logic Split: Standard Command vs Custom Function
+                    if (STANDARD_COMMANDS.has(standardType)) {
+                        switch (standardType) {
+                            case 'SET':
+                                _.set(workingVars, params[0], params[1]);
+                                rootKeyToUpdate = params[0].split('.')[0];
+                                break;
+                            case 'ADD':
+                                {
+                                    const [path, val] = params;
+                                    const existing = _.get(workingVars, path, 0);
+                                    if (Array.isArray(existing)) existing.push(val);
+                                    else _.set(workingVars, path, Number(existing) + Number(val));
                                     rootKeyToUpdate = path.split('.')[0];
                                 }
-                            }
-                            break;
-                        case 'SELECT_SET':
-                        case 'SELECT_ADD':
-                            {
-                                const [path, sKey, sVal, rKey, newVal] = params;
-                                const list = _.get(workingVars, path);
-                                if (Array.isArray(list)) {
-                                    const item = list.find(x => _.get(x, sKey) == sVal);
-                                    if (item) {
-                                        if (cmd.type === 'SELECT_SET') _.set(item, rKey, newVal);
-                                        else {
-                                            const existing = _.get(item, rKey, 0);
-                                            _.set(item, rKey, Number(existing) + Number(newVal));
-                                        }
+                                break;
+                            case 'DEL':
+                                {
+                                    const [path, idx] = params;
+                                    const list = _.get(workingVars, path);
+                                    if (Array.isArray(list)) {
+                                        list.splice(idx, 1);
                                         rootKeyToUpdate = path.split('.')[0];
                                     }
                                 }
-                            }
-                            break;
-                        case 'TIMED_SET': 
-                            {
-                                // Add to SAM_volatile
-                                const [p, v, r, isReal, t] = params;
-                                const vol = _.get(workingVars, 'SAM_volatile', []);
-                                const target = isReal ? new Date(t).toISOString() : (SillyTavern.chat.length + Number(t));
-                                vol.push([p, v, isReal, target, r]);
-                                _.set(workingVars, 'SAM_volatile', vol);
-                                rootKeyToUpdate = 'SAM_volatile';
-                            }
-                            break;
-                        case 'EVAL':
-                            {
-                                const [funcName, ...args] = params;
-                                const delta = await runSandboxedFunction(funcName, args, workingVars);
-                                if (delta && typeof delta === 'object') {
-                                    // Eval returns a delta of changes. Apply them to working vars and prepare updates
-                                    // Special handling: EVAL replaces the command text with multiple setvars
-                                    let evalReplacements = "";
-                                    for (const [k, v] of Object.entries(delta)) {
-                                        _.set(workingVars, k, v);
-                                        const root = k.split('.')[0];
-                                        const fullVal = _.get(workingVars, root);
-                                        evalReplacements += createSetVarString(root, fullVal);
+                                break;
+                            case 'SELECT_SET':
+                            case 'SELECT_ADD':
+                                {
+                                    const [path, sKey, sVal, rKey, newVal] = params;
+                                    const list = _.get(workingVars, path);
+                                    if (Array.isArray(list)) {
+                                        const item = list.find(x => _.get(x, sKey) == sVal);
+                                        if (item) {
+                                            if (standardType === 'SELECT_SET') _.set(item, rKey, newVal);
+                                            else {
+                                                const existing = _.get(item, rKey, 0);
+                                                _.set(item, rKey, Number(existing) + Number(newVal));
+                                            }
+                                            rootKeyToUpdate = path.split('.')[0];
+                                        }
                                     }
-                                    if (!cmd.isInternal) {
-                                        replacements.push({ start: cmd.start, end: cmd.end, text: evalReplacements });
-                                    }
-                                    rootKeyToUpdate = null; // Handled internally
                                 }
+                                break;
+                            case 'TIMED_SET': 
+                                {
+                                    const [p, v, r, isReal, t] = params;
+                                    const vol = _.get(workingVars, 'SAM_volatile', []);
+                                    const target = isReal ? new Date(t).toISOString() : (SillyTavern.chat.length + Number(t));
+                                    vol.push([p, v, isReal, target, r]);
+                                    _.set(workingVars, 'SAM_volatile', vol);
+                                    rootKeyToUpdate = 'SAM_volatile';
+                                }
+                                break;
+                            case 'EVAL':
+                                {
+                                    // EVAL takes ["FuncName", arg1, arg2]
+                                    const [funcName, ...args] = params;
+                                    const delta = await runSandboxedFunction(funcName, args, workingVars);
+                                    
+                                    // Common post-processing for EVAL results
+                                    if (delta && typeof delta === 'object') {
+                                        let evalReplacements = "";
+                                        for (const [k, v] of Object.entries(delta)) {
+                                            _.set(workingVars, k, v);
+                                            const root = k.split('.')[0];
+                                            const fullVal = _.get(workingVars, root);
+                                            evalReplacements += createSetVarString(root, fullVal);
+                                        }
+                                        if (!cmd.isInternal) {
+                                            replacements.push({ start: cmd.start, end: cmd.end, text: evalReplacements });
+                                        }
+                                        rootKeyToUpdate = null; 
+                                    }
+                                }
+                                break;
+                        }
+                    } else if (funcMap.has(cmd.type)) {
+                        // Direct Function Call Logic
+                        // e.g., @.GiveGold(50) -> cmd.type="GiveGold", params=[50]
+                        const funcName = cmd.type;
+                        const funcDef = funcMap.get(funcName);
+                        
+                        // Execute using params directly as args
+                        const delta = await runSandboxedFunction(funcName, params, workingVars, funcDef);
+                        
+                        // Copy-paste of EVAL post-processing
+                        if (delta && typeof delta === 'object') {
+                            let evalReplacements = "";
+                            for (const [k, v] of Object.entries(delta)) {
+                                _.set(workingVars, k, v);
+                                const root = k.split('.')[0];
+                                const fullVal = _.get(workingVars, root);
+                                evalReplacements += createSetVarString(root, fullVal);
                             }
-                            break;
-                        // ... Add other event handlers like EVENT_BEGIN here logic maps to SAM_events variable
+                            replacements.push({ start: cmd.start, end: cmd.end, text: evalReplacements });
+                            rootKeyToUpdate = null; 
+                        }
+                    } else {
+                        // Command not recognized
+                        logger.warn(`Unknown command or function: ${cmd.type}`);
                     }
 
-                    // Generate Replacement String for this specific command
+                    // Generate Replacement String for standard commands
                     if (rootKeyToUpdate && !cmd.isInternal) {
                         const newValue = _.get(workingVars, rootKeyToUpdate);
                         const replacementString = createSetVarString(rootKeyToUpdate, newValue);
@@ -340,11 +365,9 @@
                 }
             }
 
-            // 5. If we had internal commands (Timers) that changed state, we need to append those updates to the message
-            // We check if SAM_volatile or other keys changed via internal commands
-            // For simplicity in this O(n) logic, we just check if SAM_volatile changed compared to start
+            // 6. Append changes from hidden/timer events
             const finalVolatile = _.get(workingVars, 'SAM_volatile');
-            const startVolatile = _.get(getAllVariables(), 'SAM_volatile'); // Crude check
+            const startVolatile = _.get(getAllVariables(), 'SAM_volatile');
             
             let appendText = "";
             if (JSON.stringify(finalVolatile) !== JSON.stringify(startVolatile)) {
@@ -352,7 +375,7 @@
                 hasChanges = true;
             }
 
-            // 6. Apply Text Replacements (Reverse order to maintain indices)
+            // 7. Apply Replacements
             replacements.sort((a, b) => b.start - a.start);
             
             for (const rep of replacements) {
@@ -362,7 +385,7 @@
 
             content += appendText;
 
-            // 7. Save back to ST if changed
+            // 8. Save
             if (hasChanges) {
                 logger.info(`[SAM] Updates applied. Injecting ${replacements.length} setvars.`);
                 await setChatMessage({ message: content }, index, "display_current");
@@ -377,7 +400,6 @@
 
     // --- DISPATCHER ---
     
-    // Watcher: Ensures we catch the end of generation even if events miss (common on mobile)
     function startGenerationWatcher() {
         if (generationWatcherId) clearInterval(generationWatcherId);
         generationWatcherId = setInterval(() => {
@@ -394,14 +416,12 @@
         if (curr_state === STATES.PROCESSING) return;
         
         curr_state = STATES.PROCESSING;
-        // Small delay to ensure ST DOM is ready
         setTimeout(async () => {
             await processMessage("{{lastMessageId}}");
             curr_state = STATES.IDLE;
         }, 100);
     }
 
-    // Main Event Handler
     const onGenerationStarted = () => {
         logger.info("[SAM] Generation Started.");
         curr_state = STATES.AWAIT_GENERATION;
@@ -416,10 +436,6 @@
     // --- INITIALIZATION ---
 
     $(() => {
-        // Register Event Listeners
-        // We use eventMakeFirst to ensure we capture start early
-        // We handle logic primarily on STOP/END to rewrite the output
-        
         if (typeof eventMakeFirst === 'function') {
             eventMakeFirst(tavern_events.GENERATION_STARTED, onGenerationStarted);
         } else {
@@ -427,15 +443,14 @@
         }
 
         eventOn(tavern_events.GENERATION_STOPPED, onGenerationStopped);
-        eventOn(tavern_events.GENERATION_ENDED, onGenerationStopped); // Failsafe
+        eventOn(tavern_events.GENERATION_ENDED, onGenerationStopped);
         
-        // Manual Trigger
         eventOn(tavern_events.MESSAGE_SENT, () => {
             curr_state = STATES.AWAIT_GENERATION;
             startGenerationWatcher();
         });
 
-        logger.info(`${SCRIPT_NAME} Loaded. GLHF,player.`);
+        logger.info(`${SCRIPT_NAME} Loaded.`);
     });
 
 })();
