@@ -371,6 +371,12 @@ command_syntax:
             generationWatcherId = null;
         }
     }
+
+    //non dependent method:
+    //SillyTavern.getContext().variables.local.get("SAM_data");
+    //SillyTavern.getContext().variables.local.set("SAM_data", value);
+
+
     function startGenerationWatcher() {
         stopGenerationWatcher();
         logger.info(`[SAM] [Await watcher] Starting generation watcher. Will check UI every ${WATCHER_INTERVAL_MS / 1000}s.`);
