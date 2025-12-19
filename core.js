@@ -177,7 +177,7 @@ command_syntax:
     // IMPORTANT: INITIAL_STATE still contains `events` and `responseSummary` to preserve data integrity,
     // but the commands to modify them from the AI have been removed. The UI extension will manage them.
     const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: [], func: [], events: [], event_counter: 0, uniquely_identified: false, disable_dtype_mutation: false };
-
+    
     // Performance tuning
     const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     const DELAY_MS = isMobileDevice ? 10 : 5;
@@ -198,6 +198,7 @@ command_syntax:
     const WATCHER_INTERVAL_MS = 3000;
     const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
     const HANDLER_STORAGE_KEY = `__SAM_V4_CORE_EVENT_HANDLER_STORAGE__`;
+    
 
     const logger = {
         info: (...args) => console.log(`[${SCRIPT_NAME} ${SCRIPT_VERSION}]`, ...args),
@@ -288,7 +289,7 @@ command_syntax:
         }, WATCHER_INTERVAL_MS);
     }
 
-    async function getRoundCounter() { return SillyTavern.chat.length - 1; }
+    async function getRoundCounter() { return SillyTavern.getContext().chat.length - 1; }
 
     function parseStateFromMessage(messageContent) {
         if (!messageContent) return null;
@@ -616,13 +617,37 @@ command_syntax:
         await eventEmit(SAM_EVENTS.INV);
     }
 
+
+    // get user-defined functions.
+    async function getFuncs(){
+        // idea: Go into the character book and read every entry's content
+        // entry will definitely be marked with this id: __SAM_FUNCTIONLIB__
+        const sam_functionlib_id = "__SAM_FUNCTIONLIB__";
+        try {
+            const worldbookNames = await getCharWorldbookNames("current");
+            if (!worldbookNames || !worldbookNames.primary) return null;
+            const wi = await getWorldbook(worldbookNames.primary);
+            if (!wi || !Array.isArray(wi)) return null;
+            const baseDataEntry = wi.find(entry => entry.name === sam_functionlib_id);
+            if (!baseDataEntry || !baseDataEntry.content) return null;
+            return JSON.parse(baseDataEntry.content);
+        } catch (error) {
+            logger.error(`function check: An unexpected error occurred.`, error);
+            return null;
+        }
+    }
+
     const handlers = {
         handleGenerationStarted: async (ev, options, dry_run) => await unifiedEventHandler(tavern_events.GENERATION_STARTED, ev, options, dry_run),
         handleGenerationEnded: async () => await unifiedEventHandler(tavern_events.GENERATION_ENDED),
         handleMessageSwiped: () => setTimeout(async () => await unifiedEventHandler(tavern_events.MESSAGE_SWIPED), 0),
         handleMessageDeleted: (message) => setTimeout(async () => await unifiedEventHandler(tavern_events.MESSAGE_DELETED, message), 0),
         handleMessageEdited: () => setTimeout(async () => await unifiedEventHandler(tavern_events.MESSAGE_EDITED), 0),
-        handleChatChanged: () => setTimeout(async () => await unifiedEventHandler(tavern_events.CHAT_CHANGED), 10),
+        handleChatChanged: () => {
+
+            setTimeout(async () => await unifiedEventHandler(tavern_events.CHAT_CHANGED), 10)
+
+        },
         handleMessageSent: () => setTimeout(async () => await unifiedEventHandler(tavern_events.MESSAGE_SENT), 0),
         handleGenerationStopped: () => setTimeout(async () => await unifiedEventHandler(tavern_events.GENERATION_STOPPED), 0),
         

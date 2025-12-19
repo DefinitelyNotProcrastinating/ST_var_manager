@@ -439,7 +439,7 @@ command_syntax:
             }
         }, WATCHER_INTERVAL_MS);
     }
-    async function getRoundCounter() { return SillyTavern.chat.length - 1; }
+    async function getRoundCounter() { return SillyTavern.getContext().chat.length - 1; }
     function parseStateFromMessage(messageContent) {
         if (!messageContent) return null;
         const match = messageContent.match(STATE_BLOCK_PARSE_REGEX);
