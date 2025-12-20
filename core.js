@@ -18,7 +18,7 @@
 // ==
 // == [UPDATE] External Function Library:
 // ==   - Functions are now loaded dynamically from a World Info entry named
-// ==     "__SAM_FUNCTIONLIB__".
+// ==     "__SAM_IDENTIFIER__".
 // ============================================================================
 // ****************************
 // Required plugins: JS-slash-runner by n0vi028
