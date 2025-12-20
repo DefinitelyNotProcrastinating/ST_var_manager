@@ -325,7 +325,7 @@ command_syntax:
         return await applyCommandsToState(commandsToApply, baseState);
     }
 
-    function findLatestUserMsgIndex() { for (let i = SillyTavern.chat.length - 1; i >= 0; i--) { if (SillyTavern.chat[i].is_user) { return i; } } return -1; }
+    function findLatestUserMsgIndex() { for (let i = SillyTavern.getContext().chat.length - 1; i >= 0; i--) { if (SillyTavern.getContext().chat[i].is_user) { return i; } } return -1; }
     
     function goodCopy(state) { if (!state) return _.cloneDeep(INITIAL_STATE); try { return JSON.parse(JSON.stringify(state)); } catch (e) { return _.cloneDeep(state); } }
     
@@ -514,13 +514,13 @@ command_syntax:
         if (isProcessingState) { logger.warn("Aborting processMessageState: Already processing."); return; }
         isProcessingState = true;
         try {
-            if (index === "{{lastMessageId}}") { index = SillyTavern.chat.length - 1; }
-            const lastAIMessage = SillyTavern.chat[index];
+            if (index === "{{lastMessageId}}") { index = SillyTavern.getContext().chat.length - 1; }
+            const lastAIMessage = SillyTavern.getContext().chat[index];
             if (!lastAIMessage || lastAIMessage.is_user) { return; }
 
             let state;
             if (prevState) { state = goodCopy(prevState); }
-            else { state = await findLatestState(SillyTavern.chat, index - 1); }
+            else { state = await findLatestState(SillyTavern.getContext().chat, index - 1); }
 
             const newCommands = extractCommandsFromText(lastAIMessage.mes);
             const newState = await executeCommandPipeline(newCommands, state);
@@ -545,8 +545,8 @@ command_syntax:
     }
 
     async function loadStateToMemory(targetIndex) {
-        if (targetIndex === "{{lastMessageId}}") { targetIndex = SillyTavern.chat.length - 1; }
-        let state = await findLatestState(SillyTavern.chat, targetIndex);
+        if (targetIndex === "{{lastMessageId}}") { targetIndex = SillyTavern.getContext().chat.length - 1; }
+        let state = await findLatestState(SillyTavern.getContext().chat, targetIndex);
         if (targetIndex === 0) {
             const baseData = await getBaseDataFromWI();
             if (baseData) { state = _.merge({}, state, baseData); }
@@ -556,7 +556,7 @@ command_syntax:
     }
 
     async function findLastAiMessageAndIndex(beforeIndex = -1) {
-        const chat = SillyTavern.chat;
+        const chat = SillyTavern.getContext().chat;
         const searchUntil = (beforeIndex === -1) ? chat.length : beforeIndex;
         for (let i = searchUntil - 1; i >= 0; i--) { if (chat[i] && chat[i].is_user === false) return i; }
         return -1;
@@ -602,7 +602,7 @@ command_syntax:
                         case tavern_events.GENERATION_ENDED:
                             stopGenerationWatcher();
                             curr_state = STATES.PROCESSING;
-                            await processMessageState(SillyTavern.chat.length - 1);
+                            await processMessageState(SillyTavern.getContext().chat.length - 1);
                             curr_state = STATES.IDLE;
                             await shoutINV();
                             prevState = null;
@@ -696,7 +696,7 @@ command_syntax:
                     return;
                 }
                 await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newStateObject)); return variables });
-                const lastAiMessage = SillyTavern.chat[lastAiIndex];
+                const lastAiMessage = SillyTavern.getContext().chat[lastAiIndex];
                 const cleanNarrative = lastAiMessage.mes.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
                 const newStateBlock = await chunkedStringify(newStateObject);
                 const finalContent = `${cleanNarrative}\n\n${STATE_BLOCK_START_MARKER}\n${newStateBlock}\n${STATE_BLOCK_END_MARKER}`;
@@ -728,7 +728,7 @@ command_syntax:
             if (lastAiIndex === -1) { toastr.error("Cannot checkpoint: No AI message found."); return; }
             const currentState = (await getVariables()).SAM_data;
             if (!currentState) { toastr.error("Current state is invalid. Cannot checkpoint."); return; }
-            const lastAiMessage = SillyTavern.chat[lastAiIndex];
+            const lastAiMessage = SillyTavern.getContext().chat[lastAiIndex];
             const cleanNarrative = lastAiMessage.mes.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
             const newStateBlock = await chunkedStringify(currentState);
             const finalContent = `${cleanNarrative}\n\n${STATE_BLOCK_START_MARKER}\n${newStateBlock}\n${STATE_BLOCK_END_MARKER}`;
@@ -745,8 +745,8 @@ command_syntax:
         isProcessingState = true;
         try {
             toastr.info(`Rerunning commands from message at index ${lastAiIndex}...`);
-            const initialState = await findLatestState(SillyTavern.chat, lastAiIndex - 1);
-            const messageToRerun = SillyTavern.chat[lastAiIndex];
+            const initialState = await findLatestState(SillyTavern.getContext().chat, lastAiIndex - 1);
+            const messageToRerun = SillyTavern.getContext().chat[lastAiIndex];
             const newCommands = extractCommandsFromText(messageToRerun.mes);
             const newState = await executeCommandPipeline(newCommands, initialState);
             await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newState)); return variables; });
