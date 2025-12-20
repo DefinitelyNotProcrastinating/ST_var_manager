@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager (CORE ENGINE)
-// == Version: 4.1.0 "Quark"
+// == Version: 4.1.0 "Quark" (WI-Function-Loader Mod)
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It acts as the core engine, processing state-mutating commands from AI
@@ -15,6 +15,10 @@
 // ==   - This script is now the "Core Engine," handling only AI commands and state persistence.
 // ==   - Removed RESPONSE_SUMMARY and EVENT_* commands. These are now managed by the UI extension.
 // ==   - Added a robust event-based API for the UI extension to query status and commit state changes.
+// ==
+// == [UPDATE] External Function Library:
+// ==   - Functions are now loaded dynamically from a World Info entry named
+// ==     "__SAM_FUNCTIONLIB__".
 // ============================================================================
 // ****************************
 // Required plugins: JS-slash-runner by n0vi028
@@ -341,9 +345,34 @@ command_syntax:
         }
     }
 
+    // get user-defined functions from WI
+    async function getFuncs(){
+        // idea: Go into the character book and read every entry's content
+        // we're using the identifier to store the functionlib.
+        const sam_functionlib_id = "__SAM_IDENTIFIER__";
+        try {
+            const worldbookNames = await getCharWorldbookNames("current");
+            if (!worldbookNames || !worldbookNames.primary) return null;
+            const wi = await getWorldbook(worldbookNames.primary);
+            if (!wi || !Array.isArray(wi)) return null;
+            const baseDataEntry = wi.find(entry => entry.name === sam_functionlib_id);
+            if (!baseDataEntry || !baseDataEntry.content) return null;
+            return JSON.parse(baseDataEntry.content);
+        } catch (error) {
+            logger.error(`function check: An unexpected error occurred.`, error);
+            return null;
+        }
+    }
+
     async function runSandboxedFunction(funcName, params, state) {
-        const funcDef = state.func?.find(f => f.func_name === funcName);
-        if (!funcDef) { logger.warn(`EVAL: Function '${funcName}' not found.`); return; }
+        // [UPDATE] Try to load functions from WI first
+        let loadedFuncs = await getFuncs();
+        // Fallback to state-embedded functions if WI is missing, for legacy support
+        if (!loadedFuncs || !Array.isArray(loadedFuncs)) loadedFuncs = state.func || [];
+
+        const funcDef = loadedFuncs.find(f => f.func_name === funcName);
+        if (!funcDef) { logger.warn(`EVAL: Function '${funcName}' not found in WI or state.`); return; }
+        
         const timeout = funcDef.timeout ?? 2000;
         const allowNetwork = funcDef.network_access === true;
         const rawParamNames = funcDef.func_params || [];
@@ -449,12 +478,22 @@ command_syntax:
     }
 
     async function executeCommandPipeline(messageCommands, state) {
+        // [UPDATE] Load functions from WI to handle periodic/ordered execution
+        let loadedFuncs = await getFuncs();
+        if (!loadedFuncs || !Array.isArray(loadedFuncs)) loadedFuncs = state.func || [];
+        
         const promotedVolatileCommands = await processVolatileUpdates(state);
         const allCommands = [...messageCommands, ...promotedVolatileCommands];
-        const periodicCommands = state.func?.filter(f => f.periodic === true).map(f => ({ type: 'EVAL', params: `"${f.func_name}"` })) || [];
+        
+        // Use loadedFuncs (from WI) to find periodic functions
+        const periodicCommands = loadedFuncs.filter(f => f.periodic === true).map(f => ({ type: 'EVAL', params: `"${f.func_name}"` })) || [];
         const allPotentialCommands = [...allCommands, ...periodicCommands];
+        
         const priorityCommands = [], firstEvalItems = [], lastEvalItems = [], normalCommands = [];
-        const funcDefMap = new Map(state.func?.map(f => [f.func_name, f]) || []);
+        
+        // Map loadedFuncs (from WI) for lookup
+        const funcDefMap = new Map(loadedFuncs.map(f => [f.func_name, f]) || []);
+        
         for (const command of allPotentialCommands) {
             if (command.type === "TIME") { priorityCommands.push(command); continue; }
             if (command.type === 'EVAL') {
@@ -615,26 +654,6 @@ command_syntax:
     async function shoutINV(){
         logger.info("[SAM] shouting INV");
         await eventEmit(SAM_EVENTS.INV);
-    }
-
-
-    // get user-defined functions.
-    async function getFuncs(){
-        // idea: Go into the character book and read every entry's content
-        // entry will definitely be marked with this id: __SAM_FUNCTIONLIB__
-        const sam_functionlib_id = "__SAM_FUNCTIONLIB__";
-        try {
-            const worldbookNames = await getCharWorldbookNames("current");
-            if (!worldbookNames || !worldbookNames.primary) return null;
-            const wi = await getWorldbook(worldbookNames.primary);
-            if (!wi || !Array.isArray(wi)) return null;
-            const baseDataEntry = wi.find(entry => entry.name === sam_functionlib_id);
-            if (!baseDataEntry || !baseDataEntry.content) return null;
-            return JSON.parse(baseDataEntry.content);
-        } catch (error) {
-            logger.error(`function check: An unexpected error occurred.`, error);
-            return null;
-        }
     }
 
     const handlers = {
