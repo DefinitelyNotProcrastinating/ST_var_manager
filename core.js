@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager (CORE ENGINE)
-// == Version: 4.1.0 "Quark" (WI-Function-Loader Mod)
+// == Version: 4.1.0 "Quark"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It acts as the core engine, processing state-mutating commands from AI
@@ -141,6 +141,13 @@ command_syntax:
       - name: identifier
         type: string | integer
         description: The `reason` string or the numerical index of the scheduled event in the `state.volatile` array to cancel.
+  - command: SUMMARY
+    description: Adds a new Level 1 (L1) summary to the response summary list.
+    syntax: '@.SUMMARY("summary_content");'
+    parameters:
+      - name: summary_content
+        type: string
+        description: The text content of the summary to be added.
   - command: EVAL
     description: Executes a user-defined function stored in `state.func`. DANGEROUS - use with caution.
     syntax: '@.EVAL("function_name", param1, param2, ...);'
@@ -176,11 +183,11 @@ command_syntax:
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*[\\s\\S]*?\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 'sg');
 
     // MODIFIED: Regex updated to remove EVENT_* and RESPONSE_SUMMARY commands.
-    const COMMAND_START_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|CANCEL_SET|EVAL)\b\s*\(/gim;
+    const COMMAND_START_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|CANCEL_SET|EVAL|SUMMARY)\b\s*\(/gim;
 
     // IMPORTANT: INITIAL_STATE still contains `events` and `responseSummary` to preserve data integrity,
     // but the commands to modify them from the AI have been removed. The UI extension will manage them.
-    const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: [], func: [], events: [], event_counter: 0, uniquely_identified: false, disable_dtype_mutation: false };
+    const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: { L1: [], L2: [], L3: [] }, func: [], events: [], event_counter: 0, uniquely_identified: false, disable_dtype_mutation: false };
     
     // Performance tuning
     const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
@@ -469,6 +476,17 @@ command_syntax:
                     case 'SELECT_DEL': { const [listPath, identifier, targetId] = params; _.update(state.static, listPath, list => _.reject(list, { [identifier]: targetId })); break; }
                     case 'SELECT_ADD': { const [listPath, selProp, selVal, recProp, valToAdd] = params; const list = _.get(state.static, listPath); if (!Array.isArray(list)) break; const targetIndex = _.findIndex(list, { [selProp]: selVal }); if (targetIndex > -1) { const fullPath = `${listPath}[${targetIndex}].${recProp}`; const existing = _.get(state.static, fullPath); if (Array.isArray(existing)) { existing.push(valToAdd); } else { _.set(state.static, fullPath, (Number(existing) || 0) + Number(valToAdd)); } } break; }
                     case 'SELECT_SET': { const [listPath, selProp, selVal, recProp, valToSet] = params; const list = _.get(state.static, listPath); if (!Array.isArray(list)) break; const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) === selVal); if (targetIndex > -1) { const fullPath = `${listPath}[${targetIndex}].${recProp}`; if (state.disable_dtype_mutation && !isTypeMutationAllowed(_.get(state.static, fullPath), valToSet)) { logger.warn(`Blocked illegal type mutation for path "${fullPath}".`); continue; } _.set(state.static, fullPath, valToSet); } break; }
+                    case 'SUMMARY': {
+                        const [content] = params;
+                        if (typeof state.responseSummary !== 'object' || state.responseSummary === null) {
+                            state.responseSummary = { L1: [], L2: [], L3: [] };
+                        }
+                        if (!Array.isArray(state.responseSummary.L1)) {
+                            state.responseSummary.L1 = [];
+                        }
+                        state.responseSummary.L1.push(content);
+                        break;
+                    }
                     case 'EVAL': { const [funcName, ...funcParams] = params; await runSandboxedFunction(funcName, funcParams, state); break; }
                 }
             } catch (error) { logger.error(`Error processing command: ${JSON.stringify(command)}`, error); }
@@ -604,7 +622,10 @@ command_syntax:
                             curr_state = STATES.PROCESSING;
                             await processMessageState(SillyTavern.chat.length - 1);
                             curr_state = STATES.IDLE;
+                            
+                            // after processing message, call INV to refresh frontend
                             await shoutINV();
+
                             prevState = null;
                             break;
                         case tavern_events.CHAT_CHANGED:
