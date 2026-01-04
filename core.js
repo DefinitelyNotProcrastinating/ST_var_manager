@@ -1,6 +1,6 @@
 // ============================================================================
 // == Situational Awareness Manager (CORE ENGINE)
-// == Version: 4.1.0 "Quark"
+// == Version: 4.2.0 "Quark+"
 // ==
 // == This script provides a robust state management system for SillyTavern.
 // == It acts as the core engine, processing state-mutating commands from AI
@@ -16,9 +16,14 @@
 // ==   - Removed RESPONSE_SUMMARY and EVENT_* commands. These are now managed by the UI extension.
 // ==   - Added a robust event-based API for the UI extension to query status and commit state changes.
 // ==
-// == [UPDATE] External Function Library:
+// == [UPDATE in 4.1.0] External Function Library:
 // ==   - Functions are now loaded dynamically from a World Info entry named
 // ==     "__SAM_IDENTIFIER__".
+// ==
+// == [UPDATE in 4.2.0] Inclusive Commands:
+// ==   - Added @.INCSET and @.INCADD commands. These commands function like their
+// ==     SELECT_* counterparts but will create the target object if it doesn't exist,
+// ==     preventing command failure on non-existent entries.
 // ============================================================================
 // ****************************
 // Required plugins: JS-slash-runner by n0vi028
@@ -115,6 +120,44 @@ command_syntax:
       - name: selector_value
         type: any
         description: The value to match to identify the object for deletion.
+  - command: INCSET
+    description: "Inclusive Set." Finds a specific object in a list and sets its property. If the object is not found, it creates a new object with the specified properties and adds it to the list.
+    syntax: '@.INCSET("path.to.list", "selector_key", "selector_value", "receiver_key", new_value);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list of objects.
+      - name: selector_key
+        type: string
+        description: The property name to search for or create in an object.
+      - name: selector_value
+        type: any
+        description: The value to match or create to identify the correct object.
+      - name: receiver_key
+        type: string
+        description: The property name on the found/created object to update.
+      - name: new_value
+        type: any
+        description: The new value to set.
+  - command: INCADD
+    description: "Inclusive Add." Finds a specific object in a list and adds to its property. If the object is not found, it creates a new object. The new object's receiver property is initialized with the `value_to_add`.
+    syntax: '@.INCADD("path.to.list", "selector_key", "selector_value", "receiver_key", value_to_add);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list of objects.
+      - name: selector_key
+        type: string
+        description: The property name to search for or create in an object.
+      - name: selector_value
+        type: any
+        description: The value to match or create to identify the correct object.
+      - name: receiver_key
+        type: string
+        description: The property on the found/created object to add to.
+      - name: value_to_add
+        type: any
+        description: The value to add, append, or initialize with.
   - command: TIMED_SET
     description: Schedules a variable to be set to a new value in the future, either based on real-world time or in-game rounds.
     syntax: '@.TIMED_SET("path.to.var", new_value, "reason", is_real_time, timepoint);'
@@ -165,7 +208,7 @@ command_syntax:
 (function () {
     // --- CONFIGURATION ---
     const SCRIPT_NAME = "Situational Awareness Manager (Core)";
-    const SCRIPT_VERSION = "4.1.0 'Quark'";
+    const SCRIPT_VERSION = "4.2.0 'Quark+'";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
 
     // Checkpointing configuration
@@ -182,8 +225,8 @@ command_syntax:
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*([\\s\\S]*?)\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*[\\s\\S]*?\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 'sg');
 
-    // MODIFIED: Regex updated to remove EVENT_* and RESPONSE_SUMMARY commands.
-    const COMMAND_START_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|CANCEL_SET|EVAL|SUMMARY)\b\s*\(/gim;
+    // MODIFIED: Regex updated to include INCADD and INCSET commands.
+    const COMMAND_START_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|CANCEL_SET|EVAL|SUMMARY|INCSET|INCADD)\b\s*\(/gim;
 
     // IMPORTANT: INITIAL_STATE still contains `events` and `responseSummary` to preserve data integrity,
     // but the commands to modify them from the AI have been removed. The UI extension will manage them.
@@ -461,7 +504,7 @@ command_syntax:
             }
 
             try {
-                const pathCommands = ['SET', 'ADD', 'DEL', 'SELECT_DEL', 'SELECT_ADD', 'SELECT_SET', 'TIMED_SET'];
+                const pathCommands = ['SET', 'ADD', 'DEL', 'SELECT_DEL', 'SELECT_ADD', 'SELECT_SET', 'TIMED_SET', 'INCSET', 'INCADD'];
                 if (pathCommands.includes(command.type) && params.length > 0 && typeof params[0] === 'string') {
                     params[0] = resolvePath(params[0]);
                 }
@@ -476,6 +519,41 @@ command_syntax:
                     case 'SELECT_DEL': { const [listPath, identifier, targetId] = params; _.update(state.static, listPath, list => _.reject(list, { [identifier]: targetId })); break; }
                     case 'SELECT_ADD': { const [listPath, selProp, selVal, recProp, valToAdd] = params; const list = _.get(state.static, listPath); if (!Array.isArray(list)) break; const targetIndex = _.findIndex(list, { [selProp]: selVal }); if (targetIndex > -1) { const fullPath = `${listPath}[${targetIndex}].${recProp}`; const existing = _.get(state.static, fullPath); if (Array.isArray(existing)) { existing.push(valToAdd); } else { _.set(state.static, fullPath, (Number(existing) || 0) + Number(valToAdd)); } } break; }
                     case 'SELECT_SET': { const [listPath, selProp, selVal, recProp, valToSet] = params; const list = _.get(state.static, listPath); if (!Array.isArray(list)) break; const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) === selVal); if (targetIndex > -1) { const fullPath = `${listPath}[${targetIndex}].${recProp}`; if (state.disable_dtype_mutation && !isTypeMutationAllowed(_.get(state.static, fullPath), valToSet)) { logger.warn(`Blocked illegal type mutation for path "${fullPath}".`); continue; } _.set(state.static, fullPath, valToSet); } break; }
+                    case 'INCSET': {
+                        const [listPath, selProp, selVal, recProp, valToSet] = params;
+                        let list = _.get(state.static, listPath);
+                        if (!Array.isArray(list)) { _.set(state.static, listPath, []); list = _.get(state.static, listPath); }
+                        const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) === selVal);
+                        if (targetIndex > -1) {
+                            const fullPath = `${listPath}[${targetIndex}].${recProp}`;
+                            if (state.disable_dtype_mutation && !isTypeMutationAllowed(_.get(state.static, fullPath), valToSet)) { logger.warn(`Blocked illegal type mutation for path "${fullPath}".`); continue; }
+                            _.set(state.static, fullPath, valToSet);
+                        } else {
+                            const newObj = { [selProp]: selVal };
+                            _.set(newObj, recProp, valToSet);
+                            list.push(newObj);
+                        }
+                        break;
+                    }
+                    case 'INCADD': {
+                        const [listPath, selProp, selVal, recProp, valToAdd] = params;
+                        let list = _.get(state.static, listPath);
+                        if (!Array.isArray(list)) { _.set(state.static, listPath, []); list = _.get(state.static, listPath); }
+                        const targetIndex = _.findIndex(list, { [selProp]: selVal });
+                        if (targetIndex > -1) {
+                            const fullPath = `${listPath}[${targetIndex}].${recProp}`;
+                            const existing = _.get(state.static, fullPath);
+                            if (Array.isArray(existing)) {
+                                existing.push(valToAdd);
+                            } else {
+                                _.set(state.static, fullPath, (Number(existing) || 0) + Number(valToAdd));
+                            }
+                        } else {
+                            const newObj = { [selProp]: selVal, [recProp]: valToAdd };
+                            list.push(newObj);
+                        }
+                        break;
+                    }
                     case 'SUMMARY': {
                         const [content] = params;
                         if (typeof state.responseSummary !== 'object' || state.responseSummary === null) {
