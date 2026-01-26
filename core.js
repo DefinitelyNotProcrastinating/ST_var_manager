@@ -24,6 +24,9 @@
 // ==   - Added @.INCSET and @.INCADD commands. These commands function like their
 // ==     SELECT_* counterparts but will create the target object if it doesn't exist,
 // ==     preventing command failure on non-existent entries.
+// ==
+// == [UPDATE] List/Structure Operations:
+// ==   - Added @.REMOVE, @.REBASE, @.SWAP for advanced list and structure manipulation.
 // ============================================================================
 // ****************************
 // Required plugins: JS-slash-runner by n0vi028
@@ -158,6 +161,36 @@ command_syntax:
       - name: value_to_add
         type: any
         description: The value to add, append, or initialize with.
+  - command: REMOVE
+    description: Removes a specific element from a list if it matches the provided value.
+    syntax: '@.REMOVE("path.to.list", elem_data);'
+    parameters:
+      - name: path.to.list
+        type: string
+        description: The path to the list.
+      - name: elem_data
+        type: any
+        description: The value to find and remove from the list.
+  - command: REBASE
+    description: Moves an item from one path to another. If source parent is a list, item is spliced out. If target parent is a list, item is appended.
+    syntax: '@.REBASE("item_path", "base_path");'
+    parameters:
+      - name: item_path
+        type: string
+        description: The path of the item to move.
+      - name: base_path
+        type: string
+        description: The new parent path for the item.
+  - command: SWAP
+    description: Swaps the locations of two items. Handles list splicing and appending automatically if parents are lists.
+    syntax: '@.SWAP("item_path_1", "item_path_2");'
+    parameters:
+      - name: item_path_1
+        type: string
+        description: Path to the first item.
+      - name: item_path_2
+        type: string
+        description: Path to the second item.
   - command: TIMED_SET
     description: Schedules a variable to be set to a new value in the future, either based on real-world time or in-game rounds.
     syntax: '@.TIMED_SET("path.to.var", new_value, "reason", is_real_time, timepoint);'
@@ -225,8 +258,8 @@ command_syntax:
     const STATE_BLOCK_PARSE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*([\\s\\S]*?)\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 's');
     const STATE_BLOCK_REMOVE_REGEX = new RegExp(`(?:${OLD_START_MARKER.replace(/\|/g, '\\|')}|${NEW_START_MARKER.replace(/\$/g, '\\$')})\\s*[\\s\\S]*?\\s*(?:${OLD_END_MARKER.replace(/\|/g, '\\|')}|${NEW_END_MARKER.replace(/\$/g, '\\$')})`, 'sg');
 
-    // MODIFIED: Regex updated to include INCADD and INCSET commands.
-    const COMMAND_START_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|CANCEL_SET|EVAL|SUMMARY|INCSET|INCADD)\b\s*\(/gim;
+    // MODIFIED: Regex updated to include INCADD, INCSET, REMOVE, REBASE, SWAP commands.
+    const COMMAND_START_REGEX = /@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|CANCEL_SET|EVAL|SUMMARY|INCSET|INCADD|REMOVE|REBASE|SWAP)\b\s*\(/gim;
 
     // IMPORTANT: INITIAL_STATE still contains `events` and `responseSummary` to preserve data integrity,
     // but the commands to modify them from the AI have been removed. The UI extension will manage them.
@@ -504,9 +537,12 @@ command_syntax:
             }
 
             try {
-                const pathCommands = ['SET', 'ADD', 'DEL', 'SELECT_DEL', 'SELECT_ADD', 'SELECT_SET', 'TIMED_SET', 'INCSET', 'INCADD'];
-                if (pathCommands.includes(command.type) && params.length > 0 && typeof params[0] === 'string') {
-                    params[0] = resolvePath(params[0]);
+                const pathCommands = ['SET', 'ADD', 'DEL', 'SELECT_DEL', 'SELECT_ADD', 'SELECT_SET', 'TIMED_SET', 'INCSET', 'INCADD', 'REMOVE', 'REBASE', 'SWAP'];
+                if (pathCommands.includes(command.type) && params.length > 0) {
+                    if (typeof params[0] === 'string') params[0] = resolvePath(params[0]);
+                    if (['REBASE', 'SWAP'].includes(command.type) && params.length > 1 && typeof params[1] === 'string') {
+                        params[1] = resolvePath(params[1]);
+                    }
                 }
                 
                 switch (command.type) {
@@ -552,6 +588,96 @@ command_syntax:
                             const newObj = { [selProp]: selVal, [recProp]: valToAdd };
                             list.push(newObj);
                         }
+                        break;
+                    }
+                    case 'REMOVE': {
+                        const [listPath, valToRemove] = params;
+                        const list = _.get(state.static, listPath);
+                        if (Array.isArray(list)) {
+                            _.pull(list, valToRemove);
+                        }
+                        break;
+                    }
+                    case 'REBASE': {
+                        const [itemPath, basePath] = params;
+                        const itemVal = _.get(state.static, itemPath);
+                        if (itemVal === undefined) break;
+
+                        // Remove logic
+                        const pathArr = _.toPath(itemPath);
+                        const key = pathArr[pathArr.length - 1];
+                        const parentPath = pathArr.slice(0, -1).join('.');
+                        const parent = parentPath === '' ? state.static : _.get(state.static, parentPath);
+                        
+                        if (Array.isArray(parent)) {
+                            const idx = parseInt(key, 10);
+                            if (!isNaN(idx)) parent.splice(idx, 1);
+                        } else {
+                            _.unset(state.static, itemPath);
+                        }
+
+                        // Add logic
+                        const base = _.get(state.static, basePath);
+                        if (Array.isArray(base)) {
+                            base.push(itemVal);
+                        } else {
+                            // "change item_path's parent path to base_path"
+                            // New path = basePath + "." + key
+                            const newPath = basePath ? `${basePath}.${key}` : key;
+                            _.set(state.static, newPath, itemVal);
+                        }
+                        break;
+                    }
+                    case 'SWAP': {
+                        const [path1, path2] = params;
+                        // Helper to get info
+                        const getInfo = (p) => {
+                            const val = _.get(state.static, p);
+                            const pArr = _.toPath(p);
+                            const key = pArr[pArr.length - 1];
+                            const parentPath = pArr.slice(0, -1).join('.');
+                            const parent = parentPath === '' ? state.static : _.get(state.static, parentPath);
+                            const isArr = Array.isArray(parent);
+                            return { p, val, key, parent, isArr, parentPath };
+                        };
+
+                        const i1 = getInfo(path1);
+                        const i2 = getInfo(path2);
+
+                        if (i1.val === undefined || i2.val === undefined) break;
+
+                        // Remove
+                        if (i1.isArr && i2.isArr && i1.parent === i2.parent) {
+                            const idx1 = parseInt(i1.key, 10);
+                            const idx2 = parseInt(i2.key, 10);
+                            if (!isNaN(idx1) && !isNaN(idx2)) {
+                                if (idx1 > idx2) {
+                                    i1.parent.splice(idx1, 1);
+                                    i2.parent.splice(idx2, 1);
+                                } else if (idx2 > idx1) {
+                                    i2.parent.splice(idx2, 1);
+                                    i1.parent.splice(idx1, 1);
+                                } else {
+                                    // Same index? Remove once.
+                                    i1.parent.splice(idx1, 1);
+                                }
+                            }
+                        } else {
+                            if (i1.isArr) i1.parent.splice(parseInt(i1.key, 10), 1);
+                            else _.unset(state.static, i1.p);
+
+                            if (i2.isArr) i2.parent.splice(parseInt(i2.key, 10), 1);
+                            else _.unset(state.static, i2.p);
+                        }
+
+                        // Insert val1 at path2 (or append to parent2)
+                        if (i2.isArr) i2.parent.push(i1.val);
+                        else _.set(state.static, i2.p, i1.val);
+
+                        // Insert val2 at path1 (or append to parent1)
+                        if (i1.isArr) i1.parent.push(i2.val);
+                        else _.set(state.static, i1.p, i2.val);
+
                         break;
                     }
                     case 'SUMMARY': {
