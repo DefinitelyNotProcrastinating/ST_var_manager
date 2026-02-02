@@ -630,32 +630,55 @@ command_syntax:
                     }
                     case 'SWAP': {
                         const [path1, path2] = params;
+                        const DELETE_KEYWORD = "__DELETE__";
+                        const NULL_REGEX = /(\.|\[)__NULL__\]?$/;
 
-                        // Check if either path uses the special __NULL__ terminator
-                        // Matches: .__NULL__ or [__NULL__] at the end of the string
-                        const nullRegex = /(\.|\[)__NULL__\]?$/;
-                        const isNull1 = nullRegex.test(path1);
-                        const isNull2 = nullRegex.test(path2);
+                        // --- 1. DELETE MODE ---
+                        // Syntax: @.SWAP("path.to.item", "__DELETE__");
+                        if (path1 === DELETE_KEYWORD || path2 === DELETE_KEYWORD) {
+                            if (path1 === DELETE_KEYWORD && path2 === DELETE_KEYWORD) break; // no-op
+
+                            const targetPath = path1 === DELETE_KEYWORD ? path2 : path1;
+                            const itemVal = _.get(state.static, targetPath);
+                            
+                            // If item doesn't exist, we can't delete it
+                            if (itemVal === undefined) break;
+
+                            // Perform deletion
+                            const pathArr = _.toPath(targetPath);
+                            const key = pathArr[pathArr.length - 1];
+                            const parentPath = pathArr.slice(0, -1).join('.');
+                            const parent = parentPath === '' ? state.static : _.get(state.static, parentPath);
+
+                            if (Array.isArray(parent)) {
+                                const idx = parseInt(key, 10);
+                                if (!isNaN(idx)) parent.splice(idx, 1);
+                            } else {
+                                _.unset(state.static, targetPath);
+                            }
+                            break; 
+                        }
+
+                        // --- 2. REBASE MODE (One-way Move) ---
+                        // Syntax: @.SWAP("path.to.item", "new.parent[__NULL__]");
+                        const isNull1 = NULL_REGEX.test(path1);
+                        const isNull2 = NULL_REGEX.test(path2);
 
                         if (isNull1 || isNull2) {
-                            // --- REBASE MODE (One-way move) ---
-                            // If both are NULL, it's a no-op
-                            if (isNull1 && isNull2) break;
+                            if (isNull1 && isNull2) break; // no-op
 
                             // Identify Item (Source) and Base (Target)
-                            // If path2 is NULL, we move path1 -> path2's parent
-                            // If path1 is NULL, we move path2 -> path1's parent
                             const itemPath = isNull1 ? path2 : path1;
                             const rawTargetNullPath = isNull1 ? path1 : path2;
 
-                            // Strip the .__NULL__ or [__NULL__] suffix to get the container path
-                            const basePath = rawTargetNullPath.replace(nullRegex, '');
+                            // Strip the suffix to get the container path
+                            const basePath = rawTargetNullPath.replace(NULL_REGEX, '');
                             
-                            // 1. Get the item value
+                            // Get item
                             const itemVal = _.get(state.static, itemPath);
                             if (itemVal === undefined) break;
 
-                            // 2. Remove item from Source
+                            // Remove item from Source
                             const pathArr = _.toPath(itemPath);
                             const key = pathArr[pathArr.length - 1];
                             const parentPath = pathArr.slice(0, -1).join('.');
@@ -668,68 +691,68 @@ command_syntax:
                                 _.unset(state.static, itemPath);
                             }
 
-                            // 3. Add item to Target Base
-                            // If basePath is empty, we are targeting root (state.static)
+                            // Add item to Target
                             const base = basePath ? _.get(state.static, basePath) : state.static;
 
                             if (Array.isArray(base)) {
-                                // If target is a list, append the item
                                 base.push(itemVal);
                             } else {
-                                // If target is an object, set using the original key name
-                                // Construct new path: base + key
+                                // Re-use original key name at new location
                                 const newPath = basePath ? `${basePath}.${key}` : key;
                                 _.set(state.static, newPath, itemVal);
                             }
-
-                        } else {
-                            // --- STANDARD SWAP MODE ---
-                            const getInfo = (p) => {
-                                const val = _.get(state.static, p);
-                                const pArr = _.toPath(p);
-                                const key = pArr[pArr.length - 1];
-                                const parentPath = pArr.slice(0, -1).join('.');
-                                const parent = parentPath === '' ? state.static : _.get(state.static, parentPath);
-                                const isArr = Array.isArray(parent);
-                                return { p, val, key, parent, isArr, parentPath };
-                            };
-
-                            const i1 = getInfo(path1);
-                            const i2 = getInfo(path2);
-
-                            if (i1.val === undefined || i2.val === undefined) break;
-
-                            // Remove both items
-                            if (i1.isArr && i2.isArr && i1.parent === i2.parent) {
-                                const idx1 = parseInt(i1.key, 10);
-                                const idx2 = parseInt(i2.key, 10);
-                                if (!isNaN(idx1) && !isNaN(idx2)) {
-                                    if (idx1 > idx2) {
-                                        i1.parent.splice(idx1, 1);
-                                        i2.parent.splice(idx2, 1);
-                                    } else if (idx2 > idx1) {
-                                        i2.parent.splice(idx2, 1);
-                                        i1.parent.splice(idx1, 1);
-                                    } else {
-                                        i1.parent.splice(idx1, 1); // Same index
-                                    }
-                                }
-                            } else {
-                                if (i1.isArr) i1.parent.splice(parseInt(i1.key, 10), 1);
-                                else _.unset(state.static, i1.p);
-
-                                if (i2.isArr) i2.parent.splice(parseInt(i2.key, 10), 1);
-                                else _.unset(state.static, i2.p);
-                            }
-
-                            // Insert val1 at path2 location
-                            if (i2.isArr) i2.parent.push(i1.val);
-                            else _.set(state.static, i2.p, i1.val);
-
-                            // Insert val2 at path1 location
-                            if (i1.isArr) i1.parent.push(i2.val);
-                            else _.set(state.static, i1.p, i2.val);
+                            break;
                         }
+
+                        // --- 3. STANDARD SWAP MODE ---
+                        // Syntax: @.SWAP("path.to.a", "path.to.b");
+                        const getInfo = (p) => {
+                            const val = _.get(state.static, p);
+                            const pArr = _.toPath(p);
+                            const key = pArr[pArr.length - 1];
+                            const parentPath = pArr.slice(0, -1).join('.');
+                            const parent = parentPath === '' ? state.static : _.get(state.static, parentPath);
+                            const isArr = Array.isArray(parent);
+                            return { p, val, key, parent, isArr, parentPath };
+                        };
+
+                        const i1 = getInfo(path1);
+                        const i2 = getInfo(path2);
+
+                        if (i1.val === undefined || i2.val === undefined) break;
+
+                        // Remove both items from their respective parents
+                        // Special handling if they are in the same array to avoid index shifting issues
+                        if (i1.isArr && i2.isArr && i1.parent === i2.parent) {
+                            const idx1 = parseInt(i1.key, 10);
+                            const idx2 = parseInt(i2.key, 10);
+                            if (!isNaN(idx1) && !isNaN(idx2)) {
+                                if (idx1 > idx2) {
+                                    i1.parent.splice(idx1, 1);
+                                    i2.parent.splice(idx2, 1);
+                                } else if (idx2 > idx1) {
+                                    i2.parent.splice(idx2, 1);
+                                    i1.parent.splice(idx1, 1);
+                                } else {
+                                    i1.parent.splice(idx1, 1); // Same index
+                                }
+                            }
+                        } else {
+                            if (i1.isArr) i1.parent.splice(parseInt(i1.key, 10), 1);
+                            else _.unset(state.static, i1.p);
+
+                            if (i2.isArr) i2.parent.splice(parseInt(i2.key, 10), 1);
+                            else _.unset(state.static, i2.p);
+                        }
+
+                        // Insert val1 at path2 location
+                        if (i2.isArr) i2.parent.push(i1.val);
+                        else _.set(state.static, i2.p, i1.val);
+
+                        // Insert val2 at path1 location
+                        if (i1.isArr) i1.parent.push(i2.val);
+                        else _.set(state.static, i1.p, i2.val);
+
                         break;
                     }
                     case 'SUMMARY': {
