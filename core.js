@@ -1,10 +1,15 @@
 // ============================================================================
 // == Situational Awareness Manager (CORE ENGINE)
-// == Version: 5.1.0 "Iron Mongo"
+// == Version: 5.1.1 "Iron Mongo" (Patched)
 // ==
 // == [REFACTOR OVERVIEW]
 // == This version enhances the MongoDB protocol to support complex key names
 // == (The "Iron Man Problem") and adds more operators.
+// ==
+// == [PATCH NOTES]
+// == Fixed a critical issue where the JSON repair library caused a crash if
+// == not loaded correctly, preventing state persistence.
+// == Re-implemented the robust parsing logic from V4.
 // ==
 // == [ESCAPING DOTS]
 // == To use a dot inside a key name without triggering a path traversal,
@@ -63,7 +68,7 @@ Assistant: I suit up.
 (function () {
     // --- CONFIGURATION ---
     const SCRIPT_NAME = "Situational Awareness Manager (Core)";
-    const SCRIPT_VERSION = "5.1.0 'Iron Mongo'";
+    const SCRIPT_VERSION = "5.1.1 'Iron Mongo'";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
 
     // Checkpointing configuration
@@ -133,15 +138,29 @@ Assistant: I suit up.
     };
 
     // --- HELPER FUNCTIONS ---
+    const _loadingLibraries = {};
     async function loadExternalLibrary(url, globalName) {
         if (window[globalName]) return;
-        return new Promise((resolve, reject) => {
+        if (_loadingLibraries[url]) return _loadingLibraries[url];
+        
+        logger.info(`Downloading external library: ${globalName}...`);
+        _loadingLibraries[url] = new Promise((resolve, reject) => {
             const script = document.createElement('script');
             script.src = url;
-            script.onload = () => { resolve(); };
-            script.onerror = () => { reject(new Error(`Failed to load script: ${url}`)); };
+            script.onload = () => { 
+                logger.info(`Library ${globalName} loaded successfully.`); 
+                delete _loadingLibraries[url];
+                resolve(); 
+            };
+            script.onerror = () => { 
+                const err = new Error(`Failed to load script: ${url}`); 
+                logger.error(err); 
+                delete _loadingLibraries[url];
+                reject(err); 
+            };
             document.head.appendChild(script);
         });
+        return _loadingLibraries[url];
     }
 
     function extractBalancedParams(text, startIndex) {
@@ -278,13 +297,19 @@ Assistant: I suit up.
 
     // --- MONGODB UPDATE ENGINE (ADVANCED + IRON MAN SOLVER) ---
 
-    // Parses "MK\\.50.status" into ['MK.50', 'status']
     function parseSafePath(pathStr) {
         if (!pathStr || typeof pathStr !== 'string') return [pathStr];
-        // Split by dot ONLY if not preceded by backslash
-        const segments = pathStr.split(PATH_SPLIT_REGEX);
-        // Remove the backslashes from the segments
-        return segments.map(s => s.replace(/\\\./g, '.'));
+        
+        // 1. 将被转义的点 "\." 替换为一个不会冲突的占位符
+        // 这样我们就可以安全地使用普通点 "." 进行分割
+        const placeholder = "%%_SAM_ESCAPED_DOT_%%"; 
+        const protectedPath = pathStr.replace(/\\\./g, placeholder);
+        
+        // 2. 使用普通点分割
+        const segments = protectedPath.split('.');
+        
+        // 3. 将各段中的占位符还原为普通的点 "."
+        return segments.map(s => s.replace(new RegExp(placeholder, 'g'), '.'));
     }
 
     function applyMongoUpdate(target, update) {
@@ -430,12 +455,25 @@ Assistant: I suit up.
             
             try {
                 if (command.type === 'DB') {
-                    if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                    const repaired = window.jsonrepair(command.params);
-                    parsedParams = JSON.parse(repaired);
+                    // Try standard parse first
+                    try {
+                        parsedParams = JSON.parse(command.params);
+                    } catch (e) {
+                        // Fallback to jsonrepair
+                        if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                        const repaired = window.jsonrepair(command.params);
+                        parsedParams = JSON.parse(repaired);
+                    }
                 } else if (command.type === 'EVAL') {
-                     if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                     parsedParams = JSON.parse(window.jsonrepair(`[${command.params}]`));
+                    // EVAL params usually come as "func", arg1, arg2
+                    // We wrap in [] to parse as array
+                    const arrayWrapped = `[${command.params}]`;
+                    try {
+                        parsedParams = JSON.parse(arrayWrapped);
+                    } catch (e) {
+                         if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                         parsedParams = JSON.parse(window.jsonrepair(arrayWrapped));
+                    }
                 } else if (command.type === 'TIME') {
                     if (command.params.startsWith('"') || command.params.startsWith("'")) {
                         parsedParams = [ command.params.slice(1, -1) ];
