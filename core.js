@@ -1,26 +1,13 @@
 // ============================================================================
 // == Situational Awareness Manager (CORE ENGINE)
-// == Version: 5.1.1 "Iron Mongo" (Patched)
+// == Version: 5.2.0 "Farstar"
 // ==
 // == [REFACTOR OVERVIEW]
-// == This version enhances the MongoDB protocol to support complex key names
-// == (The "Iron Man Problem") and adds more operators.
-// ==
-// == [PATCH NOTES]
-// == Fixed a critical issue where the JSON repair library caused a crash if
-// == not loaded correctly, preventing state persistence.
-// == Re-implemented the robust parsing logic from V4.
-// ==
-// == [ESCAPING DOTS]
-// == To use a dot inside a key name without triggering a path traversal,
-// == escape it with a double backslash: \\.
-// == Ex: "suits.MK\\.50.status" -> updates state.suits["MK.50"].status
-// ==
-// == [NEW COMMANDS]
-// == $move (or $rename): Moves a variable from one path to another.
-// == $addToSet: Adds to a list only if it doesn't exist.
-// == $mul: Multiplies a numeric value.
-// == $min / $max: Updates value based on comparison.
+// == Integrates Automatic State Diffing & Logging.
+// == Any custom sandboxed function (EVAL) or periodic function that modifies
+// == the internal memory will now automatically generate a @.DB diff log and
+// == append it to the chat text. This permanently prevents state drift during
+// == Swipes, Message Edits, or reloading contexts!
 // ============================================================================
 // ****************************
 // Required plugins: JS-slash-runner by n0vi028
@@ -68,7 +55,7 @@ Assistant: I suit up.
 (function () {
     // --- CONFIGURATION ---
     const SCRIPT_NAME = "Situational Awareness Manager (Core)";
-    const SCRIPT_VERSION = "5.1.1 'Iron Mongo'";
+    const SCRIPT_VERSION = "5.2.0 'Farstar'";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
 
     // Checkpointing configuration
@@ -190,6 +177,44 @@ Assistant: I suit up.
         return commands;
     }
 
+    // STATE DIFF GENERATOR
+    function generateMongoDiff(oldObj, newObj) {
+        let diff = { $set: {}, $unset: {} };
+        
+        function buildPaths(obj, prefix = "") {
+            let paths = {};
+            if (obj === null || typeof obj !== 'object' || Array.isArray(obj) || Object.keys(obj).length === 0) {
+                if (prefix !== "") paths[prefix] = obj;
+                return paths;
+            }
+            for (let key in obj) {
+                let safeKey = key.replace(/\./g, '\\.'); 
+                let newPrefix = prefix ? prefix + "." + safeKey : safeKey;
+                Object.assign(paths, buildPaths(obj[key], newPrefix));
+            }
+            return paths;
+        }
+
+        const oldPaths = buildPaths(oldObj);
+        const newPaths = buildPaths(newObj);
+
+        for (let key in newPaths) {
+            if (!oldPaths.hasOwnProperty(key) || !_.isEqual(oldPaths[key], newPaths[key])) {
+                diff.$set[key] = newPaths[key];
+            }
+        }
+        for (let key in oldPaths) {
+            if (!newPaths.hasOwnProperty(key)) {
+                diff.$unset[key] = "";
+            }
+        }
+
+        if (Object.keys(diff.$set).length === 0) delete diff.$set;
+        if (Object.keys(diff.$unset).length === 0) delete diff.$unset;
+
+        return diff;
+    }
+
     function stopGenerationWatcher() { if (generationWatcherId) { clearInterval(generationWatcherId); generationWatcherId = null; } }
     
     function startGenerationWatcher() {
@@ -231,7 +256,8 @@ Assistant: I suit up.
             const message = chatHistory[i]; if (!message || message.is_user) continue;
             commandsToApply.push(...extractCommandsFromText(message.mes));
         }
-        return await applyCommandsToState(commandsToApply, baseState);
+        const result = await applyCommandsToState(commandsToApply, baseState, false);
+        return result.state;
     }
 
     function findLatestUserMsgIndex() { for (let i = SillyTavern.chat.length - 1; i >= 0; i--) { if (SillyTavern.chat[i].is_user) { return i; } } return -1; }
@@ -299,50 +325,29 @@ Assistant: I suit up.
 
     function parseSafePath(pathStr) {
         if (!pathStr || typeof pathStr !== 'string') return [pathStr];
-        
-        // 1. 将被转义的点 "\." 替换为一个不会冲突的占位符
-        // 这样我们就可以安全地使用普通点 "." 进行分割
         const placeholder = "%%_SAM_ESCAPED_DOT_%%"; 
         const protectedPath = pathStr.replace(/\\\./g, placeholder);
-        
-        // 2. 使用普通点分割
         const segments = protectedPath.split('.');
-        
-        // 3. 将各段中的占位符还原为普通的点 "."
         return segments.map(s => s.replace(new RegExp(placeholder, 'g'), '.'));
     }
 
     function applyMongoUpdate(target, update) {
         if (!update || typeof update !== 'object') return;
 
-        // $set: Sets the value of a field
         if (update.$set) {
-            for (const [path, value] of Object.entries(update.$set)) {
-                _.set(target, parseSafePath(path), value);
-            }
+            for (const [path, value] of Object.entries(update.$set)) { _.set(target, parseSafePath(path), value); }
         }
-
-        // $unset: Removes the specified field
         if (update.$unset) {
-            for (const [path, val] of Object.entries(update.$unset)) {
-                _.unset(target, parseSafePath(path));
-            }
+            for (const [path, val] of Object.entries(update.$unset)) { _.unset(target, parseSafePath(path)); }
         }
-
-        // $rename or $move: Moves a field
         const moves = update.$rename || update.$move;
         if (moves) {
             for (const [oldPath, newPath] of Object.entries(moves)) {
                 const oldPathArr = parseSafePath(oldPath);
                 const val = _.get(target, oldPathArr);
-                if (val !== undefined) {
-                    _.set(target, parseSafePath(newPath), val);
-                    _.unset(target, oldPathArr);
-                }
+                if (val !== undefined) { _.set(target, parseSafePath(newPath), val); _.unset(target, oldPathArr); }
             }
         }
-
-        // $inc: Increments the value
         if (update.$inc) {
             for (const [path, amount] of Object.entries(update.$inc)) {
                 const safePath = parseSafePath(path);
@@ -351,8 +356,6 @@ Assistant: I suit up.
                 _.set(target, safePath, numCurrent + (Number(amount) || 0));
             }
         }
-
-        // $mul: Multiplies the value
         if (update.$mul) {
             for (const [path, factor] of Object.entries(update.$mul)) {
                 const safePath = parseSafePath(path);
@@ -361,63 +364,42 @@ Assistant: I suit up.
                 _.set(target, safePath, numCurrent * (Number(factor) || 1));
             }
         }
-
-        // $min: Updates if new value is less
         if (update.$min) {
             for (const [path, val] of Object.entries(update.$min)) {
                 const safePath = parseSafePath(path);
                 const current = _.get(target, safePath);
-                if (typeof current !== 'number' || val < current) {
-                    _.set(target, safePath, val);
-                }
+                if (typeof current !== 'number' || val < current) { _.set(target, safePath, val); }
             }
         }
-
-        // $max: Updates if new value is greater
         if (update.$max) {
             for (const [path, val] of Object.entries(update.$max)) {
                 const safePath = parseSafePath(path);
                 const current = _.get(target, safePath);
-                if (typeof current !== 'number' || val > current) {
-                    _.set(target, safePath, val);
-                }
+                if (typeof current !== 'number' || val > current) { _.set(target, safePath, val); }
             }
         }
-
-        // $push: Appends to array
         if (update.$push) {
             for (const [path, payload] of Object.entries(update.$push)) {
                 const safePath = parseSafePath(path);
                 let array = _.get(target, safePath);
                 if (!Array.isArray(array)) { array = []; _.set(target, safePath, array); }
-                
                 if (payload && typeof payload === 'object' && payload.$each && Array.isArray(payload.$each)) {
                     array.push(...payload.$each);
-                } else {
-                    array.push(payload);
-                }
+                } else { array.push(payload); }
             }
         }
-
-        // $addToSet: Appends only if unique
         if (update.$addToSet) {
             for (const [path, payload] of Object.entries(update.$addToSet)) {
                 const safePath = parseSafePath(path);
                 let array = _.get(target, safePath);
                 if (!Array.isArray(array)) { array = []; _.set(target, safePath, array); }
-
-                const itemsToAdd = (payload && typeof payload === 'object' && payload.$each && Array.isArray(payload.$each)) 
-                    ? payload.$each 
-                    : [payload];
-
+                const itemsToAdd = (payload && typeof payload === 'object' && payload.$each && Array.isArray(payload.$each)) ? payload.$each : [payload];
                 itemsToAdd.forEach(item => {
                     const exists = array.some(existing => _.isEqual(existing, item));
                     if (!exists) array.push(item);
                 });
             }
         }
-
-        // $pop: Removes first/last
         if (update.$pop) {
              for (const [path, direction] of Object.entries(update.$pop)) {
                 const safePath = parseSafePath(path);
@@ -428,49 +410,38 @@ Assistant: I suit up.
                 }
             }
         }
-
-        // $pull: Removes matching items
         if (update.$pull) {
             for (const [path, criteria] of Object.entries(update.$pull)) {
                 const safePath = parseSafePath(path);
                 let array = _.get(target, safePath);
                 if (Array.isArray(array)) {
                     _.remove(array, (item) => {
-                        if (typeof criteria === 'object' && criteria !== null) {
-                            return _.isMatch(item, criteria) || _.isEqual(item, criteria);
-                        } else {
-                            return item === criteria;
-                        }
+                        if (typeof criteria === 'object' && criteria !== null) { return _.isMatch(item, criteria) || _.isEqual(item, criteria); }
+                        else { return item === criteria; }
                     });
                 }
             }
         }
     }
 
-    async function applyCommandsToState(commands, state) {
-        if (!commands || commands.length === 0) return state;
+    async function applyCommandsToState(commands, state, isLiveGeneration = false) {
+        let generatedLogs = [];
+        if (!commands || commands.length === 0) return { state, generatedLogs };
 
         for (const command of commands) {
             let parsedParams = null;
             
             try {
                 if (command.type === 'DB') {
-                    // Try standard parse first
-                    try {
-                        parsedParams = JSON.parse(command.params);
-                    } catch (e) {
-                        // Fallback to jsonrepair
+                    try { parsedParams = JSON.parse(command.params); } 
+                    catch (e) {
                         if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                        const repaired = window.jsonrepair(command.params);
-                        parsedParams = JSON.parse(repaired);
+                        parsedParams = JSON.parse(window.jsonrepair(command.params));
                     }
                 } else if (command.type === 'EVAL') {
-                    // EVAL params usually come as "func", arg1, arg2
-                    // We wrap in [] to parse as array
                     const arrayWrapped = `[${command.params}]`;
-                    try {
-                        parsedParams = JSON.parse(arrayWrapped);
-                    } catch (e) {
+                    try { parsedParams = JSON.parse(arrayWrapped); } 
+                    catch (e) {
                          if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
                          parsedParams = JSON.parse(window.jsonrepair(arrayWrapped));
                     }
@@ -498,24 +469,36 @@ Assistant: I suit up.
                         break;
                     }
                     case 'EVAL': {
-                        const [funcName, ...funcParams] = parsedParams; 
+                        const [funcName, ...funcParams] = parsedParams;
+                        
+                        // Snapshot before execution if it's live generation
+                        let oldStatic = isLiveGeneration ? goodCopy(state.static) : null;
+                        
                         await runSandboxedFunction(funcName, funcParams, state); 
+                        
+                        // After execution, diff and generate log
+                        if (isLiveGeneration && oldStatic) {
+                            let diff = generateMongoDiff(oldStatic, state.static);
+                            if (diff.$set || diff.$unset) {
+                                let diffStr = JSON.stringify(diff, null, 2);
+                                generatedLogs.push(`@.DB(${diffStr});`);
+                            }
+                        }
                         break; 
                     }
                 }
             } catch (error) { logger.error(`Error executing ${command.type}:`, error); }
         }
-        return state;
+        return { state, generatedLogs };
     }
 
-    async function executeCommandPipeline(messageCommands, state) {
+    async function executeCommandPipeline(messageCommands, state, isLiveGeneration = false) {
         let loadedFuncs = await getFuncs();
         const periodicCommands = (loadedFuncs || [])
             .filter(f => f.periodic === true)
             .map(f => ({ type: 'EVAL', params: `"${f.func_name}"` }));
         const allCommands = [...messageCommands, ...periodicCommands];
-        await applyCommandsToState(allCommands, state);
-        return state;
+        return await applyCommandsToState(allCommands, state, isLiveGeneration);
     }
 
     async function processMessageState(index) {
@@ -531,11 +514,39 @@ Assistant: I suit up.
             else { state = await findLatestState(SillyTavern.chat, index - 1); }
 
             const newCommands = extractCommandsFromText(lastAIMessage.mes);
-            const newState = await executeCommandPipeline(newCommands, state);
+            
+            // Pass `true` to indicate live generation, enabling Auto-Diff logging
+            const { state: newState, generatedLogs } = await executeCommandPipeline(newCommands, state, true);
 
             await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newState)); return variables });
 
-            const cleanNarrative = lastAIMessage.mes.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
+            let cleanNarrative = lastAIMessage.mes.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
+            
+            // INJECT GENERATED LOGS into the AI response
+            if (generatedLogs && generatedLogs.length > 0) {
+                let appendedLogs = generatedLogs.join('\n');
+                
+                // Find index of the very last command to group them together
+                let lastCmdEndIndex = -1;
+                COMMAND_START_REGEX.lastIndex = 0;
+                let match;
+                while ((match = COMMAND_START_REGEX.exec(cleanNarrative)) !== null) {
+                    const extraction = extractBalancedParams(cleanNarrative, match.index + match[0].length);
+                    lastCmdEndIndex = extraction.endIndex; 
+                    // Absorb trailing semicolon if present
+                    if (lastCmdEndIndex < cleanNarrative.length && cleanNarrative[lastCmdEndIndex] === ';') {
+                        lastCmdEndIndex++;
+                    }
+                    COMMAND_START_REGEX.lastIndex = extraction.endIndex;
+                }
+                
+                if (lastCmdEndIndex !== -1) {
+                    cleanNarrative = cleanNarrative.slice(0, lastCmdEndIndex) + '\n' + appendedLogs + cleanNarrative.slice(lastCmdEndIndex);
+                } else {
+                    cleanNarrative += '\n\n' + appendedLogs;
+                }
+            }
+            
             let finalContent = cleanNarrative;
             const currentRound = await getRoundCounter();
             const shouldCheckpoint = ENABLE_AUTO_CHECKPOINT && CHECKPOINT_FREQUENCY > 0 && (currentRound > 0 && (currentRound % CHECKPOINT_FREQUENCY === 0 || index === 0));
@@ -714,7 +725,7 @@ Assistant: I suit up.
         try {
             const resetEvent = getButtonEvent("重置内部状态（慎用）");
             const checkpointEvent = getButtonEvent("手动检查点");
-            if (resetEvent) eventOn(resetEvent, resetCurrentState);
+            if (resetEvent) eventOn(resetEvent, manualCheckpoint);
             if (checkpointEvent) eventOn(checkpointEvent, manualCheckpoint);
         } catch (e) {}
 
