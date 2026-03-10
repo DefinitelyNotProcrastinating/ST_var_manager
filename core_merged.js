@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         SAM Core Engine - Fully Integrated (Complete)
-// @version      6.1.0
-// @description  SAM engine with fully-featured integrated UI, Auto-Summarization, Database, and API Manager inside a single floating window.
-// @author       SAM Integrated
+// @name         SAM Core Engine - Fully Integrated (Refactored)
+// @version      6.2.0
+// @description  SAM engine refactored to use RFC 6902 (JSON Patch) for all state operations, enhancing robustness and structure.
+// @author       SAM Extension Team
 // @match        *://*/*
 // @grant        none
 // ==/UserScript==
@@ -13,20 +13,18 @@ $((() => {
     // ========================================================================
     // 1. 基础配置与标识常量
     // ========================================================================
-    const INSTANCE_KEY = "__sam_core_widget_v6_complete__";
+    const INSTANCE_KEY = "__sam_core_widget_v6__";
     const STYLE_ID = "sam-core-widget-style";
     const WIDGET_ID = "sam-core-widget-root";
     const APP_NAME = "SAM 核心管理器";
     
-    const SCRIPT_VERSION = "6.1.0 'Complete'";
+    const SCRIPT_VERSION = "6.2.0 'Lone star'";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     const MINISEARCH_URL = "https://cdn.jsdelivr.net/npm/minisearch@6.3.0/dist/umd/index.min.js";
     
-    const NEW_START_MARKER = '$$$$$$data_block$$$$$$';
-    const NEW_END_MARKER = '$$$$$$data_block_end$$$$$$';
-    const STATE_BLOCK_PARSE_REGEX = new RegExp(`${NEW_START_MARKER.replace(/\$/g, '\\$')}\\s*([\\s\\S]*?)\\s*${NEW_END_MARKER.replace(/\$/g, '\\$')}`, 's');
-    const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${NEW_START_MARKER.replace(/\$/g, '\\$')}[\\s\\S]*?${NEW_END_MARKER.replace(/\$/g, '\\$')}`, 'sg');
-    const COMMAND_START_REGEX = /@\.(DB|TIME|EVAL)\b\s*\(/gim;
+    // Regex to find and extract content from <UpdateVariable> blocks.
+    const UPDATE_BLOCK_EXTRACT_REGEX = /<UpdateVariable>([\s\S]*?)<\/UpdateVariable>/gim;
+    const UPDATE_BLOCK_REMOVE_REGEX = /<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gim;
     
     const INITIAL_STATE = { 
         static: {}, time: "", volatile:[], 
@@ -71,7 +69,7 @@ $((() => {
         },
         skipWIAN_When_summarizing: false,
         regexes:[],
-        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令格式为：\n@.insert(key="unique_key", content="详细描述", keywords=["关键词1"])\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 @.insert() 指令。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
+        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用 RFC 6902 JSON Patch 格式，并包裹在 <UpdateVariable> 标签内。例如:\n<UpdateVariable>\n{ "op": "add", "path": "/unique_key", "value": { "content": "详细描述", "keywords": ["关键词1"] } }\n</UpdateVariable>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <UpdateVariable> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
         summary_prompt_L3: `You are a summarization expert. Review the following list of sequential event summaries (L2 summaries). Your task is to condense them into a single, high-level narrative paragraph (an L3 summary). Focus on the most significant developments.\n\n---\n**Summaries to Condense:**\n{{summary_content}}\n---`
     };
   
@@ -94,6 +92,8 @@ $((() => {
         info: (...args) => console.log(`[${APP_NAME}]`, ...args),
         warn: (...args) => console.warn(`[${APP_NAME}]`, ...args),
         error: (...args) => console.error(`[${APP_NAME}]`, ...args),
+        shoutInfo: (...args) => toastr.info(`[${APP_NAME}]`, ...args),
+        shoutError: (...args) => toastr.error(`[${APP_NAME}]`, ...args)
     };
   
     let curr_state = STATES.IDLE;
@@ -140,7 +140,7 @@ $((() => {
                 this.miniSearch = new y.MiniSearch(this.miniSearchConfig);
                 this.isInitialized = true;
                 return true;
-            } catch (error) { logger.error("DB init failed.", error); this.isEnabled = false; return false; }
+            } catch (error) { logger.shoutError("DB init failed.", error); this.isEnabled = false; return false; }
         }
         _checkReady() { return this.isEnabled && this.isInitialized; }
         setMemo(key, content, keywords =[]) {
@@ -175,7 +175,7 @@ $((() => {
                 this.documentMap = new Map(Object.entries(data.documentMap));
                 this.isInitialized = true;
                 return true;
-            } catch (error) { logger.error("DB import failed.", error); return false; }
+            } catch (error) { logger.shoutError("DB import failed.", error); return false; }
         }
     }
   
@@ -259,7 +259,7 @@ $((() => {
     }
   
     // ========================================================================
-    // 6. 基础工具与状态操作函数
+    // 6. 基础工具与状态操作函数 (Refactored Core)
     // ========================================================================
     function O(elem, type, listener, options) {
         if (elem && "function" == typeof elem.addEventListener) {
@@ -354,14 +354,6 @@ $((() => {
         if (dbStateJson) { try { sam_db.import(dbStateJson); } catch(e){} }
     }
   
-    // Core Engine - Diff & Apply
-    function applyMongoUpdate(target, update) {
-        if (!update || typeof update !== 'object') return;
-        const parseSafePath = (p) => p.replace(/\\\./g, "%%ESCAPED%%").split('.').map(s => s.replace(/%%ESCAPED%%/g, '.'));
-        if (update.$set) for (const[path, val] of Object.entries(update.$set)) _.set(target, parseSafePath(path), val);
-        if (update.$unset) for (const [path] of Object.entries(update.$unset)) _.unset(target, parseSafePath(path));
-    }
-  
     async function runSandboxedFunction(funcName, params, state) {
         const funcDef = samFunctions.find(f => f.func_name === funcName);
         if (!funcDef) return;
@@ -380,44 +372,117 @@ $((() => {
                 resolve(await userFunc.apply(null, [state, _, fetchImpl, null, ...params]));
             } catch (err) { reject(err); }
         });
-        try { await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); } catch(e) { logger.error(`Func Error:`, e); }
+        try { await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); } catch(e) { logger.shoutError(`Func Error:`, e); logger.error(`Function "${funcName}" execution failed:`, e);
     }
   
-    async function applyCommandsToState(commands, state) {
-        if (!commands || commands.length === 0) return { state };
-        for (const cmd of commands) {
+    /**
+     * Parses a JSON Pointer (RFC 6902) path string into an array of keys.
+     * @param {string} pointer The JSON Pointer string (e.g., "/a/b/0").
+     * @returns {string[]} An array of keys for _.set/_.get.
+     */
+    function parseJsonPointer(pointer) {
+        if (typeof pointer !== 'string' || pointer.length === 0 || pointer[0] !== '/') {
+            throw new Error(`Invalid JSON Pointer: must be a string starting with '/'. Received: ${pointer}`);
+        }
+        // An empty pointer refers to the root of the static object.
+        if (pointer === '/') return [];
+        // Split, remove the initial empty string, and decode ~1 and ~0.
+        return pointer.substring(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'));
+    }
+
+    /**
+     * Applies an array of RFC 6902-based operations to the state object.
+     * @param {Array<object>} operations The array of operation objects.
+     * @param {object} state The current state object to modify.
+     * @returns {Promise<{state: object}>} The modified state.
+     */
+    async function applyOperationsToState(operations, state) {
+        if (!operations || operations.length === 0) return { state };
+        
+        for (const op of operations) {
+            if (!op || typeof op.op !== 'string') continue;
             try {
-                let params = null;
-                if (cmd.type === 'TIME') params = [cmd.params.replace(/^['"]|['"]$/g, '')];
-                else {
-                    try { params = JSON.parse(cmd.type === 'EVAL' ? `[${cmd.params}]` : cmd.params); }
-                    catch(e) {
-                        if (typeof y.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                        params = JSON.parse(y.jsonrepair(cmd.type === 'EVAL' ? `[${cmd.params}]` : cmd.params));
-                    }
+                switch (op.op) {
+                    case 'add':
+                    case 'replace':
+                        // Standard JSON Patch 'add' and 'replace' target the 'static' property.
+                        if (typeof op.path === 'string') {
+                            const pathKeys = parseJsonPointer(op.path);
+                            _.set(state.static, pathKeys, op.value);
+                        }
+                        break;
+                    case 'remove':
+                        // Standard JSON Patch 'remove'.
+                        if (typeof op.path === 'string') {
+                            const pathKeys = parseJsonPointer(op.path);
+                            _.unset(state.static, pathKeys);
+                        }
+                        break;
+                    case 'time':
+                        // Custom operation to set the time.
+                        if (typeof op.value === 'string') {
+                            state.time = op.value;
+                        }
+                        break;
+                    case 'func':
+                        // Custom operation to execute a sandboxed function.
+                        if (typeof op.func_name === 'string') {
+                            const params = Array.isArray(op.params) ? op.params : [];
+                            await runSandboxedFunction(op.func_name, params, state);
+                        }
+                        break;
+                    default:
+                        logger.warn(`Unknown operation type: ${op.op}`);
+                        break;
                 }
-                if (cmd.type === 'DB') applyMongoUpdate(state.static, params);
-                else if (cmd.type === 'TIME') state.time = params[0];
-                else if (cmd.type === 'EVAL') await runSandboxedFunction(params[0], params.slice(1), state);
-            } catch(e) {}
+            } catch(e) {
+                logger.error(`Failed to apply operation:`, op, e);
+                logger.shoutError(`Failed to apply operation: ${e.message}`);
+            }
         }
         return { state };
     }
   
-    function extractCommandsFromText(messageContent) {
-        COMMAND_START_REGEX.lastIndex = 0; let match; const commands =[];
-        while ((match = COMMAND_START_REGEX.exec(messageContent)) !== null) {
-            let depth = 1; let i = match.index + match[0].length; let inString = false; let quoteChar = '';
-            while (i < messageContent.length && depth > 0) {
-                const c = messageContent[i];
-                if (inString) { if (c === quoteChar && messageContent[i-1] !== '\\') inString = false; }
-                else { if (c === '"' || c === "'" || c === '`') { inString = true; quoteChar = c; } else if (c === '(') depth++; else if (c === ')') depth--; }
-                i++;
-            }
-            commands.push({ type: match[1].toUpperCase(), params: messageContent.substring(match.index + match[0].length, i - 1).trim() });
-            COMMAND_START_REGEX.lastIndex = i;
+    /**
+     * Extracts and parses all operations from <UpdateVariable> blocks in a text.
+     * @param {string} messageContent The text to scan.
+     * @returns {Promise<Array<object>>} A flattened array of all found operation objects.
+     */
+    async function extractOperationsFromText(messageContent) {
+        const operations = [];
+        let match;
+
+        // Ensure jsonrepair library is loaded
+        if (typeof y.jsonrepair !== 'function') {
+            await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
         }
-        return commands;
+
+        UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0; // Reset regex state
+        while ((match = UPDATE_BLOCK_EXTRACT_REGEX.exec(messageContent)) !== null) {
+            let content = match[1].trim();
+            if (!content) continue;
+            
+            // Heuristically wrap content in an array if it's not already,
+            // allowing jsonrepair to fix comma-less object lists.
+            if (!content.startsWith('[') && !content.endsWith(']')) {
+                content = `[${content}]`;
+            }
+
+            try {
+                const repairedJson = y.jsonrepair(content);
+                const parsedData = JSON.parse(repairedJson);
+                
+                if (Array.isArray(parsedData)) {
+                    operations.push(...parsedData);
+                } else if (typeof parsedData === 'object' && parsedData !== null) {
+                    operations.push(parsedData);
+                }
+            } catch (e) {
+                logger.shoutError(`Failed to parse <UpdateVariable> block content: ${e.message}`);
+                logger.error("Failed to parse <UpdateVariable> block content:", e, "\nContent:", match[1]);
+            }
+        }
+        return operations;
     }
   
     // ========================================================================
@@ -450,7 +515,7 @@ $((() => {
         if (msgs.length === 0) return false;
         
         const contentStr = msgs.map(m => {
-            let processed = m.mes.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
+            let processed = m.mes.replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim();
             samSettings.regexes.forEach(rx => { if(rx.enabled && rx.regex_body) try { processed = processed.replace(new RegExp(rx.regex_body, 'g'), ''); }catch(e){} });
             return `${m.name}: ${processed}`;
         }).join('\n');
@@ -466,22 +531,29 @@ $((() => {
             } else {
                 resultL2 = await SillyTavern.getContext().generateQuietPrompt({ quietPrompt: promptL2, skipWIAN: samSettings.skipWIAN_When_summarizing });
             }
-        } catch (e) { logger.error("L2 Summary failed", e); if (typeof toastr !== 'undefined') toastr.error(`L2 摘要失败: ${e.message}`); return false; }
+        } catch (e) {
+            logger.error("L2 Summary failed", e);
+            logger.shoutError(`L2 Summary failed: ${e.message}`);
+            if (typeof toastr !== 'undefined') toastr.error(`L2 摘要失败: ${e.message}`); return false; }
   
         if (!resultL2) return false;
   
-        const inserts =[];
-        const cleanL2 = resultL2.replace(/@\.insert\s*\(([\s\S]*?)\)/gi, (m, argsStr) => {
-            try {
-                let fixed = argsStr.replace(/(\w+)=/g, '"$1":');
-                const args = JSON.parse(`{${fixed}}`);
-                if(args.key && args.content) inserts.push(args);
-            } catch(e) {} return '';
-        }).trim();
+        const dbOperations = await extractOperationsFromText(resultL2);
+        for (const op of dbOperations) {
+            // Process database insertions from summary
+            if (op.op === 'add' && op.path && op.value && typeof op.value.content === 'string') {
+                const pathParts = op.path.split('/');
+                const key = pathParts[pathParts.length - 1];
+                if (key) {
+                   sam_db.setMemo(key, op.value.content, Array.isArray(op.value.keywords) ? op.value.keywords : []);
+                }
+            }
+        }
+  
+        const cleanL2 = resultL2.replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim();
   
         if (cleanL2) {
             samData.responseSummary.L2.push({ index_begin: startIndex, index_end: endIndex, content: cleanL2, level: 0 });
-            for (const item of inserts) sam_db.setMemo(item.key, item.content, item.keywords);
             samData.summary_progress = endIndex;
   
             const l3Set = samSettings.summary_levels.L3;
@@ -513,9 +585,18 @@ $((() => {
         if (!chat[index] || chat[index].is_user) return;
         
         let state = goodCopy(samData);
-        const cmds = extractCommandsFromText(chat[index].mes).concat(samFunctions.filter(f => f.periodic).map(f => ({ type: 'EVAL', params: `"${f.func_name}"` })));
         
-        await applyCommandsToState(cmds, state);
+        // Extract operations from the AI's message
+        const opsFromMessage = await extractOperationsFromText(chat[index].mes);
+        
+        // Create operations for any periodic functions
+        const periodicOps = samFunctions
+            .filter(f => f.periodic)
+            .map(f => ({ op: 'func', func_name: f.func_name, params: [] }));
+        
+        // Apply all operations to the state
+        await applyOperationsToState([...opsFromMessage, ...periodicOps], state);
+
         samData = state;
         await applyDataToChat(samData, index);
     }
@@ -530,12 +611,13 @@ $((() => {
         
         const chat = SillyTavern.getContext().chat;
         const lastMsg = chat[index];
-        const cleanNarrative = lastMsg.mes.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
+        const cleanNarrative = lastMsg.mes.replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim();
         
-        if (samSettings.enable_auto_checkpoint && samSettings.auto_checkpoint_frequency > 0 && (index === 0 || index % samSettings.auto_checkpoint_frequency === 0)) {
-            const block = await chunkedStringify(data);
-            const finalContent = `${cleanNarrative}\n\n${NEW_START_MARKER}\n${block}\n${NEW_END_MARKER}`;
-            await TavernHelper.setChatMessages([{ message_id: index, message: finalContent }]);
+        // Checkpoint logic is no longer needed as state is not stored in chat messages.
+        // If a state block needs to be stored for debugging or history, a different mechanism is needed.
+        // For now, we only update the latest message to its clean version without state blocks.
+        if (lastMsg.mes.includes('<UpdateVariable>')) {
+            await TavernHelper.setChatMessages([{ message_id: index, message: cleanNarrative }]);
         }
     }
   
@@ -752,7 +834,7 @@ $((() => {
             html = `<div style="display:flex; flex-direction:column; height:100%;">
                 <div class="sam_form_row" style="display:flex; justify-content:space-between; align-items:center; flex-shrink:0;">
                     <label class="sam_label">当前状态 JSON (可直接编辑)</label>
-                    <button class="sam_btn sam_btn_primary" id="btn_commit_data" ${!go_flag?'disabled':''}>提交数据写入</button>
+                    <button class="sam_btn sam_btn_primary" id="btn_commit_data" ${!go_flag?'disabled':''}>提交数据更改</button>
                 </div>
                 <textarea class="sam_code_editor" id="data_json_area" ${!go_flag?'disabled':''}>${JSON.stringify(samData, null, 2)}</textarea>
             </div>`;
@@ -763,11 +845,6 @@ $((() => {
                   <label class="sam_label" style="display:inline-block; margin-right:10px;">启用数据/摘要系统</label>
                   <div class="sam_toggle" id="toggle_data"><div class="sam_toggle_track ${samSettings.data_enable?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
               </div>
-              <div class="sam_form_row">
-                  <label class="sam_label" style="display:inline-block; margin-right:10px;">启用自动保存状态(Checkpoint)</label>
-                  <div class="sam_toggle" id="toggle_auto"><div class="sam_toggle_track ${samSettings.enable_auto_checkpoint?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
-              </div>
-              <div class="sam_form_row"><label class="sam_label">Checkpoint 频率</label><input type="number" class="sam_input" id="sam_chk_freq" value="${samSettings.auto_checkpoint_frequency}"></div>
               <div class="sam_form_row">
                   <label class="sam_label" style="display:inline-block; margin-right:10px;">摘要生成时跳过世界信息</label>
                   <div class="sam_toggle" id="toggle_skip"><div class="sam_toggle_track ${samSettings.skipWIAN_When_summarizing?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
@@ -793,17 +870,33 @@ $((() => {
         if (!C) return;
         const T = UI_STATE.activeTab;
 
-        const commitData = async () => {
+        const commitDataFromUI = async () => {
             if (!go_flag) { toastr.error("缺少标识符，无法写入。"); return; }
             try {
+                // For direct data editing in the DATA tab
                 const text = C.querySelector('#data_json_area')?.value;
                 if(text) {
-                    let p; try{p=JSON.parse(text);}catch(e){if(y.jsonrepair)p=y.jsonrepair(text);else throw e;}
-                    samData = p;
+                    let parsed; 
+                    try { 
+                        parsed = JSON.parse(text); 
+                    } catch(e) {
+                        if(y.jsonrepair) parsed = JSON.parse(y.jsonrepair(text)); 
+                        else throw e;
+                    }
+                    samData = parsed;
                 }
-                await applyDataToChat(samData);
-                toastr.success("数据已提交");
-            } catch(e) { toastr.error("JSON解析或提交失败"); }
+                
+                // For summary edits in the SUMMARY tab
+                C.querySelectorAll('.sam_summary_display textarea').forEach(area => {
+                    const {level, idx} = area.dataset;
+                    if (samData.responseSummary[level]?.[idx]) {
+                         samData.responseSummary[level][idx].content = area.value;
+                    }
+                });
+
+                SillyTavern.getContext().variables.local.set("SAM_data", samData);
+                toastr.success("数据已更新至本地变量");
+            } catch(e) { toastr.error(`JSON解析或提交失败: ${e.message}`); }
         };
 
         if (T === 'SUMMARY') {
@@ -824,12 +917,6 @@ $((() => {
                 await processSummarizationRun(Math.max(0, chatLen - samSettings.summary_levels.L2.frequency), chatLen, true);
                 curr_state = STATES.IDLE; updateUIStatus();
             };
-            C.querySelectorAll('.sam_summary_display textarea').forEach(area => {
-                area.onchange = (e) => {
-                    const {level, idx} = e.target.dataset;
-                    samData.responseSummary[level][idx].content = e.target.value;
-                };
-            });
             C.querySelectorAll('.sam_summary_display .sam_delete_icon').forEach(icon => {
                 icon.onclick = (e) => {
                     const {level, idx} = e.target.dataset;
@@ -837,14 +924,12 @@ $((() => {
                     renderTabContent();
                 };
             });
-            C.querySelector('#btn_commit_data').onclick = commitData;
+            C.querySelector('#btn_commit_data').onclick = commitDataFromUI;
         }
         else if (T === 'SETTINGS') {
             C.querySelector('#toggle_data').onclick = () => { samSettings.data_enable = !samSettings.data_enable; renderTabContent(); };
-            C.querySelector('#toggle_auto').onclick = () => { samSettings.enable_auto_checkpoint = !samSettings.enable_auto_checkpoint; renderTabContent(); };
             C.querySelector('#toggle_skip').onclick = () => { samSettings.skipWIAN_When_summarizing = !samSettings.skipWIAN_When_summarizing; renderTabContent(); };
             C.querySelector('#btn_save_global').onclick = () => {
-                samSettings.auto_checkpoint_frequency = parseInt(C.querySelector('#sam_chk_freq').value) || 20;
                 saveSamSettings(); toastr.success("设置已保存");
             };
             C.querySelector('#btn_export').onclick = () => {
@@ -868,7 +953,7 @@ $((() => {
                 reader.readAsText(file);
             };
         }
-        else if (T === 'DATA') { C.querySelector('#btn_commit_data').onclick = commitData; }
+        else if (T === 'DATA') { C.querySelector('#btn_commit_data').onclick = commitDataFromUI; }
         else if (T === 'CONNECTIONS' || T === 'FUNCS' || T === 'REGEX') {
             const isFunc = T === 'FUNCS';
             const isRegex = T === 'REGEX';
