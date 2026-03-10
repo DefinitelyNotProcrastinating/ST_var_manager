@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SAM Core Engine - Fully Integrated (Refactored)
-// @version      6.2.0
+// @version      6.2.2
 // @description  SAM engine refactored to use RFC 6902 (JSON Patch) for all state operations, enhancing robustness and structure.
 // @author       SAM Extension Team
 // @match        *://*/*
@@ -18,7 +18,7 @@ $((() => {
     const WIDGET_ID = "sam-core-widget-root";
     const APP_NAME = "SAM 核心管理器";
     
-    const SCRIPT_VERSION = "6.2.0 'Lone star'";
+    const SCRIPT_VERSION = "6.2.2 'Lone star'";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     const MINISEARCH_URL = "https://cdn.jsdelivr.net/npm/minisearch@6.3.0/dist/umd/index.min.js";
     
@@ -79,9 +79,17 @@ $((() => {
     const y = (function () { try { if (window.top && window.top.document) return window.top; } catch (err) {} return window; })();
     const v = (function (contextWindow) { try { if (contextWindow && contextWindow.document) return contextWindow.document; } catch (err) {} return document; })(y);
     
+    function cleanupDOM() {
+        try {
+            const w = v.getElementById(WIDGET_ID); if (w) w.remove();
+            const s = v.getElementById(STYLE_ID); if (s) s.remove();
+        } catch(e) {}
+    }
+
     if (y[INSTANCE_KEY] && "function" == typeof y[INSTANCE_KEY].stop) {
       try { y[INSTANCE_KEY].stop(); } catch (err) {}
     }
+    cleanupDOM(); // Ensures completely clean slate from previously terminated IIFEs
   
     // ========================================================================
     // 3. 统一全局状态
@@ -145,7 +153,7 @@ $((() => {
         _checkReady() { return this.isEnabled && this.isInitialized; }
         setMemo(key, content, keywords =[]) {
             if (!this._checkReady()) return;
-            const doc = { key: key, keywords: [key, ...keywords].join(' ').toLowerCase() };
+            const doc = { key: key, keywords:[key, ...keywords].join(' ').toLowerCase() };
             if (this.miniSearch.has(key)) this.miniSearch.remove({ key });
             this.miniSearch.add(doc);
             this.documentMap.set(key, content);
@@ -324,7 +332,7 @@ $((() => {
             if (!worldInfoName) return[];
             const wiData = await SillyTavern.getContext().loadWorldInfo(worldInfoName);
             const funcEntry = Object.values(wiData?.entries || {}).find(e => e.comment === SAM_FUNCTIONLIB_ID);
-            return funcEntry && funcEntry.content ? JSON.parse(funcEntry.content) : [];
+            return funcEntry && funcEntry.content ? JSON.parse(funcEntry.content) :[];
         } catch (e) { return[]; }
     }
     
@@ -358,7 +366,7 @@ $((() => {
         const funcDef = samFunctions.find(f => f.func_name === funcName);
         if (!funcDef) return;
         const timeout = funcDef.timeout ?? 2000;
-        const formalParamNames = []; let restParamName = null;
+        const formalParamNames =[]; let restParamName = null;
         for (const param of (funcDef.func_params ||[])) { 
             if (param.startsWith('...')) restParamName = param.substring(3); 
             else formalParamNames.push(param); 
@@ -369,10 +377,15 @@ $((() => {
         const execPromise = new Promise(async (resolve, reject) => {
             try {
                 const userFunc = new Function('state', '_', 'fetch', 'XMLHttpRequest', ...formalParamNames, `'use strict';\n${bodyPrologue}${funcDef.func_body}`);
-                resolve(await userFunc.apply(null, [state, _, fetchImpl, null, ...params]));
+                resolve(await userFunc.apply(null,[state, _, fetchImpl, null, ...params]));
             } catch (err) { reject(err); }
         });
-        try { await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); } catch(e) { logger.shoutError(`Func Error:`, e); logger.error(`Function "${funcName}" execution failed:`, e);
+        try { 
+            await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); } 
+        catch(e) { 
+            logger.shoutError(`Func Error:`, e);
+             logger.error(`Function "${funcName}" execution failed:`, e);
+        }
     }
   
     /**
@@ -385,7 +398,7 @@ $((() => {
             throw new Error(`Invalid JSON Pointer: must be a string starting with '/'. Received: ${pointer}`);
         }
         // An empty pointer refers to the root of the static object.
-        if (pointer === '/') return [];
+        if (pointer === '/') return[];
         // Split, remove the initial empty string, and decode ~1 and ~0.
         return pointer.substring(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'));
     }
@@ -427,7 +440,7 @@ $((() => {
                     case 'func':
                         // Custom operation to execute a sandboxed function.
                         if (typeof op.func_name === 'string') {
-                            const params = Array.isArray(op.params) ? op.params : [];
+                            const params = Array.isArray(op.params) ? op.params :[];
                             await runSandboxedFunction(op.func_name, params, state);
                         }
                         break;
@@ -449,7 +462,7 @@ $((() => {
      * @returns {Promise<Array<object>>} A flattened array of all found operation objects.
      */
     async function extractOperationsFromText(messageContent) {
-        const operations = [];
+        const operations =[];
         let match;
 
         // Ensure jsonrepair library is loaded
@@ -505,7 +518,7 @@ $((() => {
   
     async function processSummarizationRun(startIndex, endIndex, force = false) {
         const chat = SillyTavern.getContext().chat;
-        if (!samData.responseSummary) samData.responseSummary = { L1: [], L2: [], L3:[] };
+        if (!samData.responseSummary) samData.responseSummary = { L1:[], L2: [], L3:[] };
         
         if (force) {
             samData.responseSummary.L2 = samData.responseSummary.L2.filter(s => s.index_begin >= endIndex || s.index_end <= startIndex);
@@ -545,7 +558,7 @@ $((() => {
                 const pathParts = op.path.split('/');
                 const key = pathParts[pathParts.length - 1];
                 if (key) {
-                   sam_db.setMemo(key, op.value.content, Array.isArray(op.value.keywords) ? op.value.keywords : []);
+                   sam_db.setMemo(key, op.value.content, Array.isArray(op.value.keywords) ? op.value.keywords :[]);
                 }
             }
         }
@@ -592,7 +605,7 @@ $((() => {
         // Create operations for any periodic functions
         const periodicOps = samFunctions
             .filter(f => f.periodic)
-            .map(f => ({ op: 'func', func_name: f.func_name, params: [] }));
+            .map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
         
         // Apply all operations to the state
         await applyOperationsToState([...opsFromMessage, ...periodicOps], state);
@@ -655,7 +668,7 @@ $((() => {
     function updateUIStatus() {
         if (k.statusText) {
             k.statusText.textContent = `引擎状态: ${curr_state} | 数据: ${go_flag && samSettings.data_enable ? '活跃' : '休眠'}`;
-            k.statusText.style.color = ["PROCESSING", "SUMMARIZING"].includes(curr_state) ? "#f0ad4e" : "#5cb85c";
+            k.statusText.style.color =["PROCESSING", "SUMMARIZING"].includes(curr_state) ? "#f0ad4e" : "#5cb85c";
         }
     }
   
@@ -748,8 +761,8 @@ $((() => {
               <div class="sam_summary_display">
                   ${['L3', 'L2', 'L1'].map(level => `
                     <div class="sam_summary_box">
-                      <h4>${level} 级摘要 (${(samData.responseSummary[level] || []).length})</h4>
-                      ${(samData.responseSummary[level] || []).map((s, i) => `
+                      <h4>${level} 级摘要 (${(samData.responseSummary[level] ||[]).length})</h4>
+                      ${(samData.responseSummary[level] ||[]).map((s, i) => `
                         <div style="margin-bottom:10px;">
                           <div style="font-size:10px; color:#666; display:flex; justify-content:space-between;"><span>范围: ${s.index_begin}-${s.index_end}</span> <span class="sam_delete_icon" data-level="${level}" data-idx="${i}">×</span></div>
                           <textarea class="sam_textarea" data-level="${level}" data-idx="${i}" style="min-height:80px;">${s.content}</textarea>
@@ -803,7 +816,7 @@ $((() => {
                 <div class="sam_detail">
                     ${func ? `
                        <div class="sam_form_row"><label class="sam_label">函数名</label><input class="sam_input" value="${func.func_name}" data-field="func_name"></div>
-                       <div class="sam_form_row"><label class="sam_label">参数 (逗号分隔)</label><input class="sam_input" value="${(func.func_params || []).join(', ')}" data-field="func_params"></div>
+                       <div class="sam_form_row"><label class="sam_label">参数 (逗号分隔)</label><input class="sam_input" value="${(func.func_params ||[]).join(', ')}" data-field="func_params"></div>
                        <div class="sam_form_row" style="flex:1; display:flex; flex-direction:column;"><label class="sam_label">函数体 (JS)</label><textarea class="sam_code_editor" data-field="func_body">${func.func_body}</textarea></div>
                        <div class="sam_form_grid">
                            <div><label class="sam_label" style="display:inline-block; margin-right:10px;">周期执行</label><div class="sam_toggle" data-field="periodic"><div class="sam_toggle_track ${func.periodic?'on':''}"><div class="sam_toggle_thumb"></div></div></div></div>
@@ -818,7 +831,7 @@ $((() => {
                 <div class="sam_sidebar">
                     <div class="sam_sidebar_header"><span>正则过滤器</span><button class="sam_btn_small" id="btn_add_regex">+</button></div>
                     <ul class="sam_list" id="regex_list">
-                        ${(samSettings.regexes || []).map((r, i) => `<li data-idx="${i}" class="${i === UI_STATE.selectedRegexIndex ? 'active' : ''}">${r.name} <span class="sam_delete_icon" data-idx="${i}">×</span></li>`).join('')}
+                        ${(samSettings.regexes ||[]).map((r, i) => `<li data-idx="${i}" class="${i === UI_STATE.selectedRegexIndex ? 'active' : ''}">${r.name} <span class="sam_delete_icon" data-idx="${i}">×</span></li>`).join('')}
                     </ul>
                     <div style="padding:10px; border-top:1px solid #333;"><button class="sam_btn sam_btn_primary" style="width:100%;" id="btn_save_regexes">保存所有正则</button></div>
                 </div>
@@ -957,7 +970,7 @@ $((() => {
         else if (T === 'CONNECTIONS' || T === 'FUNCS' || T === 'REGEX') {
             const isFunc = T === 'FUNCS';
             const isRegex = T === 'REGEX';
-            const sourceArr = isFunc ? samFunctions : (samSettings.regexes || []);
+            const sourceArr = isFunc ? samFunctions : (samSettings.regexes ||[]);
             const selectedIdx = isFunc ? 'selectedFuncIndex' : 'selectedRegexIndex';
             const addBtnId = isFunc ? 'btn_add_func' : 'btn_add_regex';
             const saveBtnId = isFunc ? 'btn_save_funcs' : 'btn_save_regexes';
@@ -965,7 +978,7 @@ $((() => {
 
             if (isFunc || isRegex) {
                 C.querySelector(`#${addBtnId}`).onclick = () => {
-                    const newItem = isFunc ? { func_name: "新函数", func_params: [], func_body: "//..." } : { name: "新正则", regex_body: "", enabled: true };
+                    const newItem = isFunc ? { func_name: "新函数", func_params:[], func_body: "//..." } : { name: "新正则", regex_body: "", enabled: true };
                     sourceArr.push(newItem);
                     UI_STATE[selectedIdx] = sourceArr.length - 1;
                     renderTabContent();
@@ -1045,75 +1058,89 @@ $((() => {
     }
   
     function buildWidgetHTML() {
-        if (!v.body) return;
-        const exist = v.getElementById(WIDGET_ID); if (exist) exist.remove();
-        
-        const c = v.createElement("div"); c.id = WIDGET_ID;
-        c.innerHTML = `
-          <button class="th-asr-fab" title="${APP_NAME}">
-            <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
-          </button>
-          <div class="th-asr-panel" hidden>
-            <div class="sam_modal_header">
-              <div class="sam_header_title"><span class="sam_brand">SAM</span> 管理器 <span class="sam_version">v${SCRIPT_VERSION}</span></div>
-              <button class="sam_close_icon" id="sam_btn_close">✕</button>
-            </div>
-            <div class="sam_tabs">
-                <button class="sam_tab active" data-tab="SUMMARY">摘要</button>
-                <button class="sam_tab" data-tab="CONNECTIONS">连接</button>
-                <button class="sam_tab" data-tab="REGEX">正则</button>
-                <button class="sam_tab" data-tab="DATA">数据</button>
-                <button class="sam_tab" data-tab="FUNCS">函数</button>
-                <button class="sam_tab" data-tab="SETTINGS">设置</button>
-            </div>
-            <div class="sam_content_area" id="sam_tab_content"></div>
-            <div class="sam_modal_footer">
-                <div class="sam_status_bar" id="sam_status_display">初始化中...</div>
-                <div class="sam_actions"><button class="sam_btn sam_btn_secondary" id="sam_btn_refresh">重载数据</button></div>
-            </div>
-          </div>
-        `;
-        v.body.appendChild(c);
-        
-        k.widget = c; k.panel = c.querySelector(".th-asr-panel"); k.fab = c.querySelector(".th-asr-fab");
-        k.contentArea = c.querySelector("#sam_tab_content"); k.statusText = c.querySelector("#sam_status_display");
-        
-        const header = c.querySelector(".sam_modal_header");
-        
-        O(k.fab, "click", () => { if ("1"!==k.widget.dataset.dragging) togglePanel(true); });
-        O(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
-        O(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(); renderTabContent(); toastr.info("数据已重载"); });
-        
-        c.querySelectorAll('.sam_tab').forEach(tab => {
-            O(tab, "click", (e) => {
-                c.querySelectorAll('.sam_tab').forEach(t=>t.classList.remove('active'));
-                tab.classList.add('active');
-                UI_STATE.activeTab = tab.dataset.tab;
-                renderTabContent();
+        try {
+            if (!v.body) return false;
+            const exist = v.getElementById(WIDGET_ID); if (exist) exist.remove();
+            
+            const c = v.createElement("div"); c.id = WIDGET_ID;
+            // Initially hide the widget, until `loadContextData` confirms SAM ID presence
+            c.style.display = 'none';
+            c.innerHTML = `
+              <button class="th-asr-fab" title="${APP_NAME}">
+                <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+              </button>
+              <div class="th-asr-panel" hidden>
+                <div class="sam_modal_header">
+                  <div class="sam_header_title"><span class="sam_brand">SAM</span> 管理器 <span class="sam_version">v${SCRIPT_VERSION}</span></div>
+                  <button class="sam_close_icon" id="sam_btn_close">✕</button>
+                </div>
+                <div class="sam_tabs">
+                    <button class="sam_tab active" data-tab="SUMMARY">摘要</button>
+                    <button class="sam_tab" data-tab="CONNECTIONS">连接</button>
+                    <button class="sam_tab" data-tab="REGEX">正则</button>
+                    <button class="sam_tab" data-tab="DATA">数据</button>
+                    <button class="sam_tab" data-tab="FUNCS">函数</button>
+                    <button class="sam_tab" data-tab="SETTINGS">设置</button>
+                </div>
+                <div class="sam_content_area" id="sam_tab_content"></div>
+                <div class="sam_modal_footer">
+                    <div class="sam_status_bar" id="sam_status_display">初始化中...</div>
+                    <div class="sam_actions"><button class="sam_btn sam_btn_secondary" id="sam_btn_refresh">重载数据</button></div>
+                </div>
+              </div>
+            `;
+            v.body.appendChild(c);
+            
+            k.widget = c; 
+            k.panel = c.querySelector(".th-asr-panel"); 
+            k.fab = c.querySelector(".th-asr-fab");
+            k.contentArea = c.querySelector("#sam_tab_content"); 
+            k.statusText = c.querySelector("#sam_status_display");
+            
+            if (!k.widget || !k.panel || !k.fab || !k.contentArea) throw new Error("Missing Elements");
+            
+            const header = c.querySelector(".sam_modal_header");
+            
+            O(k.fab, "click", () => { if ("1"!==k.widget.dataset.dragging) togglePanel(true); });
+            O(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
+            O(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(); renderTabContent(); toastr.info("数据已重载"); });
+            
+            c.querySelectorAll('.sam_tab').forEach(tab => {
+                O(tab, "click", (e) => {
+                    c.querySelectorAll('.sam_tab').forEach(t=>t.classList.remove('active'));
+                    tab.classList.add('active');
+                    UI_STATE.activeTab = tab.dataset.tab;
+                    renderTabContent();
+                });
             });
-        });
-        
-        let drag = { active: false, id: null, sX: 0, sY: 0, oL: 0, oT: 0 };
-        const onDown = (e) => {
-            if (e.target.closest("button,input,textarea,select,.sam_toggle")) return;
-            const rect = k.widget.getBoundingClientRect();
-            drag = { active: true, id: e.pointerId, sX: e.clientX, sY: e.clientY, oL: rect.left, oT: rect.top };
-            k.widget.dataset.dragging = "0"; e.preventDefault();
-        };
-        const onMove = (e) => {
-            if (!drag.active || (drag.id !== null && e.pointerId !== drag.id)) return;
-            const dx = e.clientX - drag.sX; const dy = e.clientY - drag.sY;
-            if (Math.abs(dx)+Math.abs(dy) > 4) k.widget.dataset.dragging = "1";
-            let nL = drag.oL + dx; let nT = drag.oT + dy;
-            k.widget.style.left = `${nL}px`; k.widget.style.top = `${nT}px`;
-        };
-        const onUp = () => { if (drag.active) { drag.active = false; setTimeout(() => { k.widget.dataset.dragging = "0"; }, 0); } };
-        
-        O(k.fab, "pointerdown", onDown); O(header, "pointerdown", onDown);
-        O(v, "pointermove", onMove); O(v, "pointerup", onUp); O(v, "pointercancel", onUp);
-        
-        k.widget.style.left = `${Math.max(8, y.innerWidth - 64)}px`;
-        k.widget.style.top = `${Math.max(8, Math.min(y.innerHeight - 64, 120))}px`;
+            
+            let drag = { active: false, id: null, sX: 0, sY: 0, oL: 0, oT: 0 };
+            const onDown = (e) => {
+                if (e.target.closest("button,input,textarea,select,.sam_toggle")) return;
+                const rect = k.widget.getBoundingClientRect();
+                drag = { active: true, id: e.pointerId, sX: e.clientX, sY: e.clientY, oL: rect.left, oT: rect.top };
+                k.widget.dataset.dragging = "0"; e.preventDefault();
+            };
+            const onMove = (e) => {
+                if (!drag.active || (drag.id !== null && e.pointerId !== drag.id)) return;
+                const dx = e.clientX - drag.sX; const dy = e.clientY - drag.sY;
+                if (Math.abs(dx)+Math.abs(dy) > 4) k.widget.dataset.dragging = "1";
+                let nL = drag.oL + dx; let nT = drag.oT + dy;
+                k.widget.style.left = `${nL}px`; k.widget.style.top = `${nT}px`;
+            };
+            const onUp = () => { if (drag.active) { drag.active = false; setTimeout(() => { k.widget.dataset.dragging = "0"; }, 0); } };
+            
+            O(k.fab, "pointerdown", onDown); O(header, "pointerdown", onDown);
+            O(v, "pointermove", onMove); O(v, "pointerup", onUp); O(v, "pointercancel", onUp);
+            
+            k.widget.style.left = `${Math.max(8, y.innerWidth - 64)}px`;
+            k.widget.style.top = `${Math.max(8, Math.min(y.innerHeight - 64, 120))}px`;
+
+            return true;
+        } catch (e) {
+            logger.error("Widget creation failed:", e);
+            return false;
+        }
     }
   
     function togglePanel(open) {
@@ -1141,6 +1168,11 @@ $((() => {
         else { samData = goodCopy(INITIAL_STATE); SillyTavern.getContext().variables.local.set("SAM_data", samData); }
         await initializeDatabase(samData.jsondb);
         updateUIStatus();
+
+        // Control Widget Visibility dynamically based on ID presence in the context
+        if (k.widget) {
+            k.widget.style.display = go_flag ? 'block' : 'none';
+        }
     }
   
     async function initSAM() {
@@ -1161,9 +1193,31 @@ $((() => {
         logger.info(`SAM Core Engine V${SCRIPT_VERSION} fully loaded.`);
     }
   
-    y[INSTANCE_KEY] = { stop: () => { while(P.length) P.pop()(); if(k.widget) k.widget.remove(); if(v.getElementById(STYLE_ID)) v.getElementById(STYLE_ID).remove(); delete y[INSTANCE_KEY]; } };
+    y[INSTANCE_KEY] = { 
+        stop: () => { 
+            while(P.length) { 
+                try { P.pop()(); } catch(e) {} 
+            } 
+            try { if(k.widget) k.widget.remove(); } catch(e) {}
+            cleanupDOM(); 
+            delete y[INSTANCE_KEY]; 
+        } 
+    };
+
+    const startup = () => {
+        Nn();
+        // Self-destruct sequence if Widget DOM creation fails (or environment blocks UI)
+        if (!buildWidgetHTML()) {
+            logger.error("Failed to build widget. Self-destructing script instance.");
+            if (y[INSTANCE_KEY] && typeof y[INSTANCE_KEY].stop === 'function') {
+                y[INSTANCE_KEY].stop();
+            }
+            return;
+        }
+        initSAM();
+    };
     
-    if (v.readyState === "loading") { O(v, "DOMContentLoaded", () => { Nn(); buildWidgetHTML(); initSAM(); }, { once: true }); } 
-    else { Nn(); buildWidgetHTML(); initSAM(); }
+    if (v.readyState === "loading") { O(v, "DOMContentLoaded", startup, { once: true }); } 
+    else { startup(); }
   
   })());
