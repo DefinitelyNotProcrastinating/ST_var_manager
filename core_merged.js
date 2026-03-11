@@ -105,6 +105,7 @@ $((() => {
         try {
             const w = v.getElementById(WIDGET_ID); if (w) w.remove();
             const s = v.getElementById(STYLE_ID); if (s) s.remove();
+            const wd = v.getElementById("sam-watchdog-script"); if (wd) wd.remove(); // 新增：清理看门狗
             k.widget = null; k.panel = null; k.fab = null; k.header = null; k.contentArea = null; k.statusText = null; k.depsText = null;
         } catch(e) {}
     }
@@ -1368,6 +1369,54 @@ $((() => {
         An();
     }
 
+    function setupWatchdog() {
+        if (!v.body) return;
+        const WATCHDOG_ID = "sam-watchdog-script";
+        let wd = v.getElementById(WATCHDOG_ID);
+        if (wd) wd.remove();
+        
+        // 注入原生环境的看门狗脚本 (脱离 Tampermonkey 沙盒，免疫上下文销毁)
+        wd = v.createElement("script");
+        wd.id = WATCHDOG_ID;
+        wd.textContent = `
+            (function() {
+                var lastSeenBeat = -1;
+                var strikes = 0;
+                var checkInterval = setInterval(function() {
+                    var widget = document.getElementById('${WIDGET_ID}');
+                    if (!widget) { clearInterval(checkInterval); return; }
+                    
+                    var currentBeat = parseInt(widget.getAttribute('data-beat') || '0', 10);
+                    if (currentBeat > 0 && currentBeat === lastSeenBeat) {
+                        strikes++;
+                        if (strikes >= 2) {
+                            widget.remove();
+                            var s = document.getElementById('${STYLE_ID}'); if (s) s.remove();
+                            var self = document.getElementById('${WATCHDOG_ID}'); if (self) self.remove();
+                            clearInterval(checkInterval);
+                            console.log('[SAM Watchdog] 核心引擎已断开，失效悬浮窗已自动清理。');
+                        }
+                    } else {
+                        strikes = 0;
+                        lastSeenBeat = currentBeat;
+                    }
+                }, 2000);
+            })();
+        `;
+        v.body.appendChild(wd);
+        
+        // 在核心环境开启心跳
+        let beatCount = 1;
+        if (k.widget) k.widget.setAttribute('data-beat', beatCount.toString());
+        const hb = setInterval(() => {
+            if (k.widget) {
+                beatCount++;
+                k.widget.setAttribute('data-beat', beatCount.toString());
+            }
+        }, 2000);
+        P.push(() => clearInterval(hb)); // 注册到清理池，正常退出时自动终止心跳
+    }
+
     function buildWidgetHTML() {
         try {
             if (!v.body) return false;
@@ -1506,6 +1555,8 @@ $((() => {
                 Tn(UI_STATE.uiLeft, UI_STATE.uiTop, true);
             }
             O(y, "resize", () => { An(); En(); });
+
+            setupWatchdog();
 
             return true;
         } catch (e) {
