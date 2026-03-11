@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SAM Core Engine - Fully Integrated (Refactored)
-// @version      6.2.2
+// @version      6.2.4
 // @description  SAM engine refactored to use RFC 6902 (JSON Patch) for all state operations, enhancing robustness and structure.
 // @author       SAM Extension Team
 // @match        *://*/*
@@ -18,9 +18,10 @@ $((() => {
     const WIDGET_ID = "sam-core-widget-root";
     const APP_NAME = "SAM 核心管理器";
     
-    const SCRIPT_VERSION = "6.2.2 'Lone star'";
+    const SCRIPT_VERSION = "6.2.4 'Lone star'";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     const MINISEARCH_URL = "https://cdn.jsdelivr.net/npm/minisearch@6.3.0/dist/umd/index.min.js";
+    const JSON_PATCH_URL = "https://cdn.jsdelivr.net/npm/fast-json-patch@3.1.1/index.min.js";
     
     // Regex to find and extract content from <UpdateVariable> blocks.
     const UPDATE_BLOCK_EXTRACT_REGEX = /<UpdateVariable>([\s\S]*?)<\/UpdateVariable>/gim;
@@ -79,17 +80,21 @@ $((() => {
     const y = (function () { try { if (window.top && window.top.document) return window.top; } catch (err) {} return window; })();
     const v = (function (contextWindow) { try { if (contextWindow && contextWindow.document) return contextWindow.document; } catch (err) {} return document; })(y);
     
+    // UI 内部状态引用声明
+    const k = { widget: null, panel: null, fab: null, header: null, contentArea: null, statusText: null };
+
     function cleanupDOM() {
         try {
             const w = v.getElementById(WIDGET_ID); if (w) w.remove();
             const s = v.getElementById(STYLE_ID); if (s) s.remove();
+            k.widget = null; k.panel = null; k.fab = null; k.header = null; k.contentArea = null; k.statusText = null;
         } catch(e) {}
     }
 
     if (y[INSTANCE_KEY] && "function" == typeof y[INSTANCE_KEY].stop) {
       try { y[INSTANCE_KEY].stop(); } catch (err) {}
     }
-    cleanupDOM(); // Ensures completely clean slate from previously terminated IIFEs
+    cleanupDOM();
   
     // ========================================================================
     // 3. 统一全局状态
@@ -108,7 +113,7 @@ $((() => {
     let event_queue =[];
     let isDispatching = false;
     let generationWatcherId = null;
-    let go_flag = false; // 是否激活了SAM Identifier
+    let go_flag = false;
     let current_run_is_dry = false;
   
     // --- 数据与UI状态 ---
@@ -119,7 +124,6 @@ $((() => {
     let sam_db = null;
     let apiManager = null;
   
-    // UI 内部状态
     let UI_STATE = {
         panelOpen: false, uiLeft: null, uiTop: null, fabSizePx: 48,
         activeTab: 'SUMMARY',
@@ -127,8 +131,6 @@ $((() => {
         selectedPresetIndex: -1,
         selectedRegexIndex: -1
     };
-    
-    const k = { widget: null, panel: null, contentArea: null, statusText: null };
   
     // ========================================================================
     // 4. SAMDatabase 类封装
@@ -294,9 +296,7 @@ $((() => {
     }
   
     function goodCopy(state) { return _.cloneDeep(state || INITIAL_STATE); }
-    async function chunkedStringify(obj) { return new Promise((resolve) => setTimeout(() => resolve(JSON.stringify(obj, null, 2)), 5)); }
   
-    // Settings Loader
     function loadSamSettings() {
         const { extensionSettings } = SillyTavern.getContext();
         if (!extensionSettings[MODULE_NAME]) extensionSettings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
@@ -384,33 +384,22 @@ $((() => {
             await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); } 
         catch(e) { 
             logger.shoutError(`Func Error:`, e);
-             logger.error(`Function "${funcName}" execution failed:`, e);
+            logger.error(`Function "${funcName}" execution failed:`, e);
         }
     }
-  
-    /**
-     * Parses a JSON Pointer (RFC 6902) path string into an array of keys.
-     * @param {string} pointer The JSON Pointer string (e.g., "/a/b/0").
-     * @returns {string[]} An array of keys for _.set/_.get.
-     */
+
     function parseJsonPointer(pointer) {
         if (typeof pointer !== 'string' || pointer.length === 0 || pointer[0] !== '/') {
             throw new Error(`Invalid JSON Pointer: must be a string starting with '/'. Received: ${pointer}`);
         }
-        // An empty pointer refers to the root of the static object.
         if (pointer === '/') return[];
-        // Split, remove the initial empty string, and decode ~1 and ~0.
         return pointer.substring(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'));
     }
 
-    /**
-     * Applies an array of RFC 6902-based operations to the state object.
-     * @param {Array<object>} operations The array of operation objects.
-     * @param {object} state The current state object to modify.
-     * @returns {Promise<{state: object}>} The modified state.
-     */
     async function applyOperationsToState(operations, state) {
-        if (!operations || operations.length === 0) return { state };
+        if (!operations || operations.length === 0) return { state, generatedDiffs:[] };
+        
+        let generatedDiffs =[];
         
         for (const op of operations) {
             if (!op || typeof op.op !== 'string') continue;
@@ -418,30 +407,42 @@ $((() => {
                 switch (op.op) {
                     case 'add':
                     case 'replace':
-                        // Standard JSON Patch 'add' and 'replace' target the 'static' property.
                         if (typeof op.path === 'string') {
                             const pathKeys = parseJsonPointer(op.path);
                             _.set(state.static, pathKeys, op.value);
                         }
                         break;
                     case 'remove':
-                        // Standard JSON Patch 'remove'.
                         if (typeof op.path === 'string') {
                             const pathKeys = parseJsonPointer(op.path);
                             _.unset(state.static, pathKeys);
                         }
                         break;
                     case 'time':
-                        // Custom operation to set the time.
                         if (typeof op.value === 'string') {
                             state.time = op.value;
                         }
                         break;
                     case 'func':
-                        // Custom operation to execute a sandboxed function.
                         if (typeof op.func_name === 'string') {
                             const params = Array.isArray(op.params) ? op.params :[];
+                            
+                            // Snapshot static state before running custom function
+                            const preState = goodCopy(state.static);
+                            
+                            // Run function which modifies state
                             await runSandboxedFunction(op.func_name, params, state);
+                            
+                            // Generate diff of the state changes to append back
+                            if (typeof y.jsonpatch === 'undefined') {
+                                await loadExternalLibrary(JSON_PATCH_URL, 'jsonpatch');
+                            }
+                            if (y.jsonpatch && typeof y.jsonpatch.compare === 'function') {
+                                const diffs = y.jsonpatch.compare(preState, state.static);
+                                if (diffs && diffs.length > 0) {
+                                    generatedDiffs.push(...diffs);
+                                }
+                            }
                         }
                         break;
                     default:
@@ -453,43 +454,27 @@ $((() => {
                 logger.shoutError(`Failed to apply operation: ${e.message}`);
             }
         }
-        return { state };
+        return { state, generatedDiffs };
     }
   
-    /**
-     * Extracts and parses all operations from <UpdateVariable> blocks in a text.
-     * @param {string} messageContent The text to scan.
-     * @returns {Promise<Array<object>>} A flattened array of all found operation objects.
-     */
     async function extractOperationsFromText(messageContent) {
         const operations =[];
         let match;
-
-        // Ensure jsonrepair library is loaded
         if (typeof y.jsonrepair !== 'function') {
             await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
         }
-
-        UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0; // Reset regex state
+        UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0;
         while ((match = UPDATE_BLOCK_EXTRACT_REGEX.exec(messageContent)) !== null) {
             let content = match[1].trim();
             if (!content) continue;
-            
-            // Heuristically wrap content in an array if it's not already,
-            // allowing jsonrepair to fix comma-less object lists.
             if (!content.startsWith('[') && !content.endsWith(']')) {
                 content = `[${content}]`;
             }
-
             try {
                 const repairedJson = y.jsonrepair(content);
                 const parsedData = JSON.parse(repairedJson);
-                
-                if (Array.isArray(parsedData)) {
-                    operations.push(...parsedData);
-                } else if (typeof parsedData === 'object' && parsedData !== null) {
-                    operations.push(parsedData);
-                }
+                if (Array.isArray(parsedData)) operations.push(...parsedData);
+                else if (typeof parsedData === 'object' && parsedData !== null) operations.push(parsedData);
             } catch (e) {
                 logger.shoutError(`Failed to parse <UpdateVariable> block content: ${e.message}`);
                 logger.error("Failed to parse <UpdateVariable> block content:", e, "\nContent:", match[1]);
@@ -518,7 +503,7 @@ $((() => {
   
     async function processSummarizationRun(startIndex, endIndex, force = false) {
         const chat = SillyTavern.getContext().chat;
-        if (!samData.responseSummary) samData.responseSummary = { L1:[], L2: [], L3:[] };
+        if (!samData.responseSummary) samData.responseSummary = { L1:[], L2:[], L3:[] };
         
         if (force) {
             samData.responseSummary.L2 = samData.responseSummary.L2.filter(s => s.index_begin >= endIndex || s.index_end <= startIndex);
@@ -553,7 +538,6 @@ $((() => {
   
         const dbOperations = await extractOperationsFromText(resultL2);
         for (const op of dbOperations) {
-            // Process database insertions from summary
             if (op.op === 'add' && op.path && op.value && typeof op.value.content === 'string') {
                 const pathParts = op.path.split('/');
                 const key = pathParts[pathParts.length - 1];
@@ -598,40 +582,36 @@ $((() => {
         if (!chat[index] || chat[index].is_user) return;
         
         let state = goodCopy(samData);
-        
-        // Extract operations from the AI's message
-        const opsFromMessage = await extractOperationsFromText(chat[index].mes);
-        
-        // Create operations for any periodic functions
-        const periodicOps = samFunctions
-            .filter(f => f.periodic)
-            .map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
-        
-        // Apply all operations to the state
-        await applyOperationsToState([...opsFromMessage, ...periodicOps], state);
+        let messageContent = chat[index].mes;
 
-        samData = state;
-        await applyDataToChat(samData, index);
+        const opsFromMessage = await extractOperationsFromText(messageContent);
+        const periodicOps = samFunctions.filter(f => f.periodic).map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
+        
+        const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state);
+        samData = newState;
+        
+        // Append dynamically generated function diffs back into the variable update block to safely persist state.
+        if (generatedDiffs && generatedDiffs.length > 0) {
+            const updatedOps = [...opsFromMessage, ...generatedDiffs];
+            const newBlockContent = JSON.stringify(updatedOps, null, 2);
+            
+            UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0;
+            if (UPDATE_BLOCK_EXTRACT_REGEX.test(messageContent)) {
+                messageContent = messageContent.replace(UPDATE_BLOCK_REMOVE_REGEX, `<UpdateVariable>\n${newBlockContent}\n</UpdateVariable>`);
+            } else {
+                messageContent += `\n<UpdateVariable>\n${newBlockContent}\n</UpdateVariable>`;
+            }
+            
+            chat[index].mes = messageContent;
+            await TavernHelper.setChatMessages([{ message_id: index, message: messageContent }]);
+        }
+
+        await applyDataToChat(samData);
     }
   
-    async function applyDataToChat(data, index = null) {
+    async function applyDataToChat(data) {
         SillyTavern.getContext().variables.local.set("SAM_data", data);
-        if (index === null) {
-            const chat = SillyTavern.getContext().chat;
-            for (let i = chat.length - 1; i >= 0; i--) { if (!chat[i].is_user) { index = i; break; } }
-        }
-        if (index === null || index < 0) return;
-        
-        const chat = SillyTavern.getContext().chat;
-        const lastMsg = chat[index];
-        const cleanNarrative = lastMsg.mes.replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim();
-        
-        // Checkpoint logic is no longer needed as state is not stored in chat messages.
-        // If a state block needs to be stored for debugging or history, a different mechanism is needed.
-        // For now, we only update the latest message to its clean version without state blocks.
-        if (lastMsg.mes.includes('<UpdateVariable>')) {
-            await TavernHelper.setChatMessages([{ message_id: index, message: cleanNarrative }]);
-        }
+        // Note: <UpdateVariable> block stripping logic was removed to ensure patches persist in history permanently.
     }
   
     async function dispatcher(event) {
@@ -644,9 +624,7 @@ $((() => {
                 curr_state = STATES.PROCESSING; updateUIStatus();
                 const chatLen = SillyTavern.getContext().chat.length;
                 await processMessageState(chatLen - 1);
-                
                 await triggerSummaryCheck(chatLen);
-                
                 curr_state = STATES.IDLE; updateUIStatus();
             } else if (event === tavern_events.MESSAGE_SWIPED || event === tavern_events.GENERATION_STOPPED) {
                 curr_state = STATES.IDLE; updateUIStatus();
@@ -671,6 +649,47 @@ $((() => {
             k.statusText.style.color =["PROCESSING", "SUMMARIZING"].includes(curr_state) ? "#f0ad4e" : "#5cb85c";
         }
     }
+
+    // --- Start of UI Dragging & Positioning Logic (from reference) ---
+    function Ce(val, min, max, defaultVal) {
+        const o = Number(val);
+        return Number.isFinite(o) ? Math.min(max, Math.max(min, o)) : defaultVal;
+    }
+
+    function Tn(leftTarget, topTarget, saveState) {
+        if (!k.widget) return;
+        const fabSize = UI_STATE.fabSizePx;
+        const width = UI_STATE.panelOpen ? (k.widget.offsetWidth || 800) : fabSize;
+        const height = UI_STATE.panelOpen ? (k.widget.offsetHeight || 600) : fabSize;
+        
+        const maxLeft = Math.max(8, y.innerWidth - width - 8);
+        const maxTop = Math.max(8, y.innerHeight - height - 8);
+        
+        const safeLeft = Ce(leftTarget, 8, maxLeft, 8);
+        const safeTop = Ce(topTarget, 8, maxTop, 8);
+        
+        k.widget.style.left = `${safeLeft}px`;
+        k.widget.style.top = `${safeTop}px`;
+        
+        if (saveState) {
+            UI_STATE.uiLeft = safeLeft;
+            UI_STATE.uiTop = safeTop;
+        }
+    }
+
+    function An() {
+        if (!k.widget) return;
+        const rect = k.widget.getBoundingClientRect();
+        Tn(rect.left, rect.top, false);
+    }
+    
+    function En() {
+        if (!k.widget) return;
+        const rect = k.widget.getBoundingClientRect();
+        UI_STATE.uiLeft = rect.left;
+        UI_STATE.uiTop = rect.top;
+    }
+    // --- End of UI Dragging & Positioning Logic ---
   
     function Nn() {
         if (!v.head) return;
@@ -678,12 +697,12 @@ $((() => {
         const styleNode = v.createElement("style");
         styleNode.id = STYLE_ID;
         styleNode.textContent = `
-          #${WIDGET_ID} { position: fixed; z-index: 99997; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-          #${WIDGET_ID} .th-asr-fab { width: 48px; height: 48px; border: none; border-radius: 14px; cursor: pointer; color: white; background: linear-gradient(135deg, #0f766e, #0f172a); box-shadow: 0 8px 20px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; }
+          #${WIDGET_ID} { position: fixed; z-index: 99997; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+          #${WIDGET_ID} .th-asr-fab { width: 48px; height: 48px; border: none; border-radius: 14px; cursor: move; color: white; background: linear-gradient(135deg, #0f766e, #0f172a); box-shadow: 0 8px 20px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; touch-action: none; }
           #${WIDGET_ID} .th-asr-fab:hover { transform: translateY(-2px) scale(1.05); }
           #${WIDGET_ID} .th-asr-panel { margin-top: 10px; width: 800px; max-height: 90vh; border-radius: 8px; background: #1e1e1e; border: 1px solid #333; box-shadow: 0 16px 36px rgba(0,0,0,0.6); display: flex; flex-direction: column; overflow: hidden; color: #ddd; }
           #${WIDGET_ID} .th-asr-panel[hidden] { display: none !important; }
-          .sam_modal_header { background: #252526; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #333; user-select: none; }
+          .sam_modal_header { background: #252526; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #333; user-select: none; touch-action: none; }
           .sam_header_title { font-weight: bold; font-size: 14px; } .sam_brand { color: #4a6fa5; } .sam_version { font-size: 10px; color: #666; }
           .sam_close_icon { background: none; border: none; color: #888; cursor: pointer; font-size: 16px; } .sam_close_icon:hover { color: #fff; }
           .sam_tabs { display: flex; background: #2d2d2d; border-bottom: 1px solid #333; flex-shrink:0; }
@@ -697,15 +716,11 @@ $((() => {
           .sam_btn_secondary { background: #3c3c3c; color: #ccc; } .sam_btn_secondary:hover { background: #4c4c4c; }
           .sam_btn_primary { background: #0e639c; color: white; } .sam_btn_primary:hover { background: #1177bb; }
           .sam_btn_small { background: #3c3c3c; border: none; color: white; width: 20px; height: 20px; cursor: pointer; border-radius: 3px; }
-          
-          /* Form Elements */
           .sam_form_row { margin-bottom: 15px; } .sam_form_grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
           .sam_label { display: block; margin-bottom: 5px; font-size: 11px; color: #aaa; }
           .sam_input, .sam_select { width: 100%; background: #2d2d2d; border: 1px solid #3e3e3e; color: white; padding: 6px; font-size: 12px; box-sizing: border-box; }
           .sam_textarea { width: 100%; min-height: 80px; background: #151515; border: 1px solid #333; color: #ccc; font-family: monospace; padding: 10px; box-sizing: border-box; resize: vertical; }
           .sam_code_editor { height: 100%; width: 100%; background: #151515; color: #dcdcaa; border: 1px solid #333; padding: 10px; font-family: 'Consolas', monospace; box-sizing: border-box; flex: 1; resize: none; }
-          
-          /* Lists (Sidebar) */
           .sam_split { display: flex; height: 100%; gap: 15px; overflow: hidden;}
           .sam_sidebar { width: 220px; background: #252526; border: 1px solid #333; display: flex; flex-direction: column; flex-shrink:0; }
           .sam_sidebar_header { padding: 10px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items:center; font-size: 12px; font-weight: bold; }
@@ -714,15 +729,11 @@ $((() => {
           .sam_list li:hover { background: #2a2a2a; } .sam_list li.active { background: #37373d; color: white; }
           .sam_detail { flex: 1; overflow-y: auto; background: #1e1e1e; border: 1px solid #333; padding: 15px; box-sizing: border-box;}
           .sam_delete_icon { color: #666; font-weight: bold; cursor:pointer; } .sam_delete_icon:hover { color: #f86c6b; }
-          
-          /* Toggles */
           .sam_toggle { cursor: pointer; display: inline-block; vertical-align: middle; }
           .sam_toggle_track { width: 36px; height: 18px; background: #333; border-radius: 9px; position: relative; transition: background 0.2s; }
           .sam_toggle_track.on { background: #4a6fa5; }
           .sam_toggle_thumb { width: 14px; height: 14px; background: white; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: left 0.2s; }
           .sam_toggle_track.on .sam_toggle_thumb { left: 20px; }
-          
-          /* Summary Display */
           .sam_summary_display { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px; }
           .sam_summary_box { background: #252526; border: 1px solid #333; padding: 10px; border-radius: 4px; display: flex; flex-direction: column; }
           .sam_summary_box h4 { margin:0 0 10px 0; font-size: 12px; color:#888; border-bottom:1px solid #333; padding-bottom:5px; }
@@ -731,7 +742,6 @@ $((() => {
         v.head.appendChild(styleNode);
     }
   
-    // 渲染 UI 内部 HTML
     function renderTabContent() {
         if (!k.contentArea) return;
         const T = UI_STATE.activeTab;
@@ -886,27 +896,20 @@ $((() => {
         const commitDataFromUI = async () => {
             if (!go_flag) { toastr.error("缺少标识符，无法写入。"); return; }
             try {
-                // For direct data editing in the DATA tab
                 const text = C.querySelector('#data_json_area')?.value;
                 if(text) {
                     let parsed; 
-                    try { 
-                        parsed = JSON.parse(text); 
-                    } catch(e) {
-                        if(y.jsonrepair) parsed = JSON.parse(y.jsonrepair(text)); 
-                        else throw e;
-                    }
+                    try { parsed = JSON.parse(text); } 
+                    catch(e) { if(y.jsonrepair) parsed = JSON.parse(y.jsonrepair(text)); else throw e; }
                     samData = parsed;
                 }
                 
-                // For summary edits in the SUMMARY tab
                 C.querySelectorAll('.sam_summary_display textarea').forEach(area => {
                     const {level, idx} = area.dataset;
                     if (samData.responseSummary[level]?.[idx]) {
                          samData.responseSummary[level][idx].content = area.value;
                     }
                 });
-
                 SillyTavern.getContext().variables.local.set("SAM_data", samData);
                 toastr.success("数据已更新至本地变量");
             } catch(e) { toastr.error(`JSON解析或提交失败: ${e.message}`); }
@@ -942,9 +945,7 @@ $((() => {
         else if (T === 'SETTINGS') {
             C.querySelector('#toggle_data').onclick = () => { samSettings.data_enable = !samSettings.data_enable; renderTabContent(); };
             C.querySelector('#toggle_skip').onclick = () => { samSettings.skipWIAN_When_summarizing = !samSettings.skipWIAN_When_summarizing; renderTabContent(); };
-            C.querySelector('#btn_save_global').onclick = () => {
-                saveSamSettings(); toastr.success("设置已保存");
-            };
+            C.querySelector('#btn_save_global').onclick = () => { saveSamSettings(); toastr.success("设置已保存"); };
             C.querySelector('#btn_export').onclick = () => {
                 const settingsToExport = _.cloneDeep(samSettings);
                 delete settingsToExport.api_presets;
@@ -1060,11 +1061,10 @@ $((() => {
     function buildWidgetHTML() {
         try {
             if (!v.body) return false;
-            const exist = v.getElementById(WIDGET_ID); if (exist) exist.remove();
+            if (v.getElementById(WIDGET_ID)) v.getElementById(WIDGET_ID).remove();
             
             const c = v.createElement("div"); c.id = WIDGET_ID;
-            // Initially hide the widget, until `loadContextData` confirms SAM ID presence
-            c.style.display = 'none';
+            c.style.display = 'block';
             c.innerHTML = `
               <button class="th-asr-fab" title="${APP_NAME}">
                 <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
@@ -1094,14 +1094,14 @@ $((() => {
             k.widget = c; 
             k.panel = c.querySelector(".th-asr-panel"); 
             k.fab = c.querySelector(".th-asr-fab");
+            k.header = c.querySelector(".sam_modal_header");
             k.contentArea = c.querySelector("#sam_tab_content"); 
             k.statusText = c.querySelector("#sam_status_display");
             
-            if (!k.widget || !k.panel || !k.fab || !k.contentArea) throw new Error("Missing Elements");
+            if (!k.widget || !k.panel || !k.fab || !k.header) throw new Error("Missing Elements");
             
-            const header = c.querySelector(".sam_modal_header");
-            
-            O(k.fab, "click", () => { if ("1"!==k.widget.dataset.dragging) togglePanel(true); });
+            // --- Event Binding ---
+            O(k.fab, "click", () => { if ("1" !== k.widget.dataset.dragging) togglePanel(!UI_STATE.panelOpen); });
             O(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
             O(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(); renderTabContent(); toastr.info("数据已重载"); });
             
@@ -1113,28 +1113,69 @@ $((() => {
                     renderTabContent();
                 });
             });
+
+            // --- Drag Logic from Reference ---
+            const dragState = { active: false, pointerId: null, startX: 0, startY: 0, originLeft: 0, originTop: 0 };
             
-            let drag = { active: false, id: null, sX: 0, sY: 0, oL: 0, oT: 0 };
-            const onDown = (e) => {
-                if (e.target.closest("button,input,textarea,select,.sam_toggle")) return;
+            function isInteractive(node) { return !!node.closest("button,input,textarea,select,.sam_toggle"); }
+
+            function onPointerDown(e) {
+                if (e.pointerType === "mouse" && e.button !== 0) return;
+                if (e.currentTarget === k.header && isInteractive(e.target)) return;
+                
                 const rect = k.widget.getBoundingClientRect();
-                drag = { active: true, id: e.pointerId, sX: e.clientX, sY: e.clientY, oL: rect.left, oT: rect.top };
-                k.widget.dataset.dragging = "0"; e.preventDefault();
-            };
-            const onMove = (e) => {
-                if (!drag.active || (drag.id !== null && e.pointerId !== drag.id)) return;
-                const dx = e.clientX - drag.sX; const dy = e.clientY - drag.sY;
-                if (Math.abs(dx)+Math.abs(dy) > 4) k.widget.dataset.dragging = "1";
-                let nL = drag.oL + dx; let nT = drag.oT + dy;
-                k.widget.style.left = `${nL}px`; k.widget.style.top = `${nT}px`;
-            };
-            const onUp = () => { if (drag.active) { drag.active = false; setTimeout(() => { k.widget.dataset.dragging = "0"; }, 0); } };
+                dragState.active = true;
+                dragState.pointerId = Number.isFinite(e.pointerId) ? e.pointerId : null;
+                dragState.startX = e.clientX;
+                dragState.startY = e.clientY;
+                dragState.originLeft = rect.left;
+                dragState.originTop = rect.top;
+                k.widget.dataset.dragging = "0";
+                
+                if (typeof e.currentTarget.setPointerCapture === "function" && dragState.pointerId !== null) {
+                    try { e.currentTarget.setPointerCapture(dragState.pointerId); } catch (err) {}
+                }
+                e.preventDefault();
+            }
+
+            function onPointerMove(e) {
+                if (!dragState.active || (dragState.pointerId !== null && e.pointerId !== dragState.pointerId)) return;
+                
+                const dx = e.clientX - dragState.startX;
+                const dy = e.clientY - dragState.startY;
+                
+                if (Math.abs(dx) + Math.abs(dy) > 4) k.widget.dataset.dragging = "1";
+                Tn(dragState.originLeft + dx, dragState.originTop + dy, false);
+            }
+
+            function onPointerUp(e) {
+                if (dragState.active) {
+                    if (dragState.pointerId !== null && e && Number.isFinite(e.pointerId) && e.pointerId !== dragState.pointerId) return;
+                    dragState.active = false;
+                    dragState.pointerId = null;
+                    En(); // Save the final position
+                    setTimeout(() => { if (k.widget) k.widget.dataset.dragging = "0"; }, 50);
+                }
+            }
+
+            O(k.fab, "pointerdown", onPointerDown);
+            O(k.header, "pointerdown", onPointerDown);
+            O(v, "pointermove", onPointerMove);
+            O(v, "pointerup", onPointerUp);
+            O(v, "pointercancel", onPointerUp);
             
-            O(k.fab, "pointerdown", onDown); O(header, "pointerdown", onDown);
-            O(v, "pointermove", onMove); O(v, "pointerup", onUp); O(v, "pointercancel", onUp);
-            
-            k.widget.style.left = `${Math.max(8, y.innerWidth - 64)}px`;
-            k.widget.style.top = `${Math.max(8, Math.min(y.innerHeight - 64, 120))}px`;
+            // --- Initialization ---
+            togglePanel(UI_STATE.panelOpen, true);
+            if (UI_STATE.uiLeft === null || UI_STATE.uiTop === null) {
+                const fabSize = UI_STATE.fabSizePx;
+                const padding = 16;
+                const defaultLeft = y.innerWidth - fabSize - padding;
+                const defaultTop = Math.max(padding, Math.min(y.innerHeight - fabSize - padding, 120));
+                Tn(defaultLeft, defaultTop, true);
+            } else {
+                Tn(UI_STATE.uiLeft, UI_STATE.uiTop, true);
+            }
+            O(y, "resize", () => { An(); En(); });
 
             return true;
         } catch (e) {
@@ -1143,17 +1184,22 @@ $((() => {
         }
     }
   
-    function togglePanel(open) {
+    function togglePanel(open, initial = false) {
+        if (!k.panel) return;
+        if (UI_STATE.panelOpen === open && !initial) return;
         UI_STATE.panelOpen = open;
         k.panel.hidden = !open;
         if (open) {
-            k.widget.style.left = `${Math.max(8, (y.innerWidth - k.panel.offsetWidth)/2)}px`;
-            k.widget.style.top = `${Math.max(8, (y.innerHeight - k.panel.offsetHeight)/2)}px`;
             renderTabContent();
-        } else {
-            k.widget.style.left = `${Math.max(8, y.innerWidth - 64)}px`;
-            k.widget.style.top = `${Math.max(8, Math.min(y.innerHeight - 64, 120))}px`;
+            // Issue 1 Safety check: if panel was meant to render but fails dimension checks (e.g., CSS/DOM breakage), commit suicide.
+            setTimeout(() => {
+                if (k.panel && k.panel.offsetWidth === 0 && !k.panel.hidden) {
+                    logger.error("Panel layout broken / failed to display dimensions. Committing suicide.");
+                    cleanupDOM();
+                }
+            }, 100);
         }
+        An();
     }
   
     // ========================================================================
@@ -1161,6 +1207,24 @@ $((() => {
     // ========================================================================
     async function loadContextData() {
         await checkWorldInfoActivation();
+        
+        // Issue 1: Robust Suicide Logic - If SAM flag falls (missing identifier), completely destroy icon
+        if (!go_flag) {
+            logger.info("SAM identifier not found. Icon committing suicide.");
+            cleanupDOM();
+            return; // Terminate further initialization for the dormant chat state
+        }
+        
+        // Automatically resurrect the icon component if conditions validate after a switch
+        if (!k.widget) {
+            logger.info("SAM identifier found. Resurrecting icon.");
+            Nn();
+            if (!buildWidgetHTML()) {
+                logger.error("Icon failed to resurrect.");
+                return;
+            }
+        }
+
         loadSamSettings();
         samFunctions = await getFunctionsFromWI();
         let d = SillyTavern.getContext().variables.local.get("SAM_data");
@@ -1168,11 +1232,6 @@ $((() => {
         else { samData = goodCopy(INITIAL_STATE); SillyTavern.getContext().variables.local.set("SAM_data", samData); }
         await initializeDatabase(samData.jsondb);
         updateUIStatus();
-
-        // Control Widget Visibility dynamically based on ID presence in the context
-        if (k.widget) {
-            k.widget.style.display = go_flag ? 'block' : 'none';
-        }
     }
   
     async function initSAM() {
@@ -1192,28 +1251,8 @@ $((() => {
         
         logger.info(`SAM Core Engine V${SCRIPT_VERSION} fully loaded.`);
     }
-  
-    y[INSTANCE_KEY] = { 
-        stop: () => { 
-            while(P.length) { 
-                try { P.pop()(); } catch(e) {} 
-            } 
-            try { if(k.widget) k.widget.remove(); } catch(e) {}
-            cleanupDOM(); 
-            delete y[INSTANCE_KEY]; 
-        } 
-    };
 
     const startup = () => {
-        Nn();
-        // Self-destruct sequence if Widget DOM creation fails (or environment blocks UI)
-        if (!buildWidgetHTML()) {
-            logger.error("Failed to build widget. Self-destructing script instance.");
-            if (y[INSTANCE_KEY] && typeof y[INSTANCE_KEY].stop === 'function') {
-                y[INSTANCE_KEY].stop();
-            }
-            return;
-        }
         initSAM();
     };
     
