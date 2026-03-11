@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SAM Core Engine - Fully Integrated (Refactored)
-// @version      6.2.9
+// @version      6.2.11
 // @description  SAM engine refactored to use RFC 6902 (JSON Patch) for all state operations, enhancing robustness and structure.
 // @author       SAM Extension Team
 // @match        *://*/*
@@ -18,21 +18,35 @@ $((() => {
     const WIDGET_ID = "sam-core-widget-root";
     const APP_NAME = "SAM 核心管理器";
     
-    const SCRIPT_VERSION = "6.2.9 'Lone star'";
-    const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair@3.13.3/lib/umd/jsonrepair.min.js";
+    const SCRIPT_VERSION = "6.2.11 'Lone star'";
+    const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     const MINISEARCH_URL = "https://cdn.jsdelivr.net/npm/minisearch@6.3.0/dist/umd/index.min.js";
-    const JSON_PATCH_URL = "https://cdn.jsdelivr.net/npm/fast-json-patch@3.1.1/index.min.js";
-
-    var JSONRepairObj = null;
-    var MiniSearchObj = null;
-
-    // Regex to find and extract content from <UpdateVariable> blocks.
-    const UPDATE_BLOCK_EXTRACT_REGEX = /<UpdateVariable>([\s\S]*?)<\/UpdateVariable>/gim;
-    const UPDATE_BLOCK_REMOVE_REGEX = /<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gim;
     
+    // Local module references to replace global window dependencies
+    let local_jsonrepair = null;
+    let local_MiniSearch = null;
+
+    // Regex to find and extract content from <JSONPatch> blocks.
+    const UPDATE_BLOCK_EXTRACT_REGEX = /<JSONPatch>([\s\S]*?)<\/JSONPatch>/gim;
+    const UPDATE_BLOCK_REMOVE_REGEX = /<JSONPatch>[\s\S]*?<\/JSONPatch>/gim;
+    
+    // Legacy & New Checkpoint Block Regexes (Restored Functionality)
+    const OLD_START_MARKER = '$$$$$$data_block$$$$$$';
+    const OLD_END_MARKER = '$$$$$$data_block_end$$$$$$';
+    const OLD_STATE_PARSE_REGEX = new RegExp(`${OLD_START_MARKER.replace(/\$/g, '\\$')}\\s*([\\s\\S]*?)\\s*${OLD_END_MARKER.replace(/\$/g, '\\$')}`, 's');
+    const OLD_STATE_REMOVE_REGEX = new RegExp(`${OLD_START_MARKER.replace(/\$/g, '\\$')}[\\s\\S]*?${OLD_END_MARKER.replace(/\$/g, '\\$')}`, 'sg');
+    
+    const CHECKPOINT_MARKER = '<!-- SAM_CHECKPOINT -->';
+    const CHECKPOINT_REGEX = /<SAMCheckpoint>([\s\S]*?)<\/SAMCheckpoint>/s;
+    const CHECKPOINT_STRIP_REGEX = /(?:<!-- SAM_CHECKPOINT -->\s*)?<SAMCheckpoint>[\s\S]*?<\/SAMCheckpoint>/sg;
+
+    // Thread Yielding for Mobile (Restored Functionality)
+    const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const DELAY_MS = isMobileDevice ? 10 : 5;
+
     const INITIAL_STATE = { 
         static: {}, time: "", dtime: 0, volatile:[], 
-        responseSummary: { L1:[], L2: [], L3:[] }, 
+        responseSummary: { L1:[], L2:[], L3:[] }, 
         summary_progress: 0,
         jsondb: null,
         func: [], events:[], event_counter: 0 
@@ -74,14 +88,15 @@ $((() => {
         },
         skipWIAN_When_summarizing: false,
         regexes:[],
-        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用我们扩展的 JSON Patch 格式，并包裹在 <UpdateVariable> 标签内。支持的op包含: add, replace, remove, inc, mul, push, addToSet, pull, pop, min, max, move。例如:\n<UpdateVariable>\n{ "op": "inc", "path": "/gold", "value": 10 }\n</UpdateVariable>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <UpdateVariable> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
+        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用我们扩展的 JSON Patch 格式，并包裹在 <JSONPatch> 标签内。支持的op包含: replace, remove, delta, insert, inc, mul, push, addToSet, pull, pop, min, max, move。例如:\n<JSONPatch>\n[\n  { "op": "delta", "path": "/gold", "value": 10 }\n]\n</JSONPatch>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <JSONPatch> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
         summary_prompt_L3: `You are a summarization expert. Review the following list of sequential event summaries (L2 summaries). Your task is to condense them into a single, high-level narrative paragraph (an L3 summary). Focus on the most significant developments.\n\n---\n**Summaries to Condense:**\n{{summary_content}}\n---`
     };
   
     // ========================================================================
     // 2. 环境解析与全局实例清理
     // ========================================================================
-    const v = (function (contextWindow) { try { if (contextWindow && contextWindow.document) return contextWindow.document; } catch (err) {} return document; })(window);
+    const y = (function () { try { if (window.top && window.top.document) return window.top; } catch (err) {} return window; })();
+    const v = (function (contextWindow) { try { if (contextWindow && contextWindow.document) return contextWindow.document; } catch (err) {} return document; })(y);
     
     // UI 内部状态引用声明
     const k = { widget: null, panel: null, fab: null, header: null, contentArea: null, statusText: null, depsText: null };
@@ -118,6 +133,7 @@ $((() => {
     let generationWatcherId = null;
     let go_flag = false;
     let current_run_is_dry = false;
+    let isCheckpointing = false;
   
     // --- 数据与UI状态 ---
     let samSettings = structuredClone(DEFAULT_SETTINGS);
@@ -135,6 +151,19 @@ $((() => {
         selectedRegexIndex: -1
     };
   
+    window[INSTANCE_KEY] = {
+        stop: function () {
+            for (; P.length;) { const cb = P.pop(); try { cb(); } catch(e){} }
+            cleanupDOM();
+        }
+    };
+
+    async function chunkedStringify(obj) {
+        return new Promise((resolve) => {
+            setTimeout(() => { resolve(JSON.stringify(obj, null, 2)); }, DELAY_MS);
+        });
+    }
+  
     // ========================================================================
     // 4. SAMDatabase 类封装
     // ========================================================================
@@ -149,9 +178,9 @@ $((() => {
         async init() {
             if (!this.isEnabled || this.isInitialized) return this.isInitialized;
             try {
-                if (typeof window.MiniSearch !== 'function') await loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
-                if (typeof window.MiniSearch === 'function') {
-                    this.miniSearch = new window.MiniSearch(this.miniSearchConfig);
+                if (!local_MiniSearch) await loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
+                if (local_MiniSearch) {
+                    this.miniSearch = new local_MiniSearch(this.miniSearchConfig);
                     this.isInitialized = true;
                     return true;
                 } else {
@@ -189,8 +218,8 @@ $((() => {
             if (!this.isEnabled) return false;
             try {
                 const data = JSON.parse(jsonString);
-                if (typeof window.MiniSearch.loadJSON !== 'function') throw new Error("MiniSearch not fully loaded.");
-                this.miniSearch = window.MiniSearch.loadJSON(JSON.stringify(data.miniSearchIndex), this.miniSearchConfig);
+                if (!local_MiniSearch || typeof local_MiniSearch.loadJSON !== 'function') throw new Error("MiniSearch not fully loaded.");
+                this.miniSearch = local_MiniSearch.loadJSON(JSON.stringify(data.miniSearchIndex), this.miniSearchConfig);
                 this.documentMap = new Map(Object.entries(data.documentMap));
                 this.isInitialized = true;
                 return true;
@@ -280,64 +309,8 @@ $((() => {
     // ========================================================================
     // 6. 基础工具与状态操作函数 (Refactored Core)
     // ========================================================================
-
-    function generateJSONPatch(obj1, obj2) {
-        const patches =[];
-        
-        function escapeKey(key) {
-            return String(key).replace(/~/g, '~0').replace(/\//g, '~1');
-        }
-        
-        function isObject(val) {
-            return val !== null && typeof val === 'object' && !Array.isArray(val);
-        }
-
-        function diff(a, b, path) {
-            // Using lodash (_) which is already heavily used in your script
-            if (_.isEqual(a, b)) return;
-
-            if (Array.isArray(a) && Array.isArray(b)) {
-                const minLen = Math.min(a.length, b.length);
-                for (let i = 0; i < minLen; i++) {
-                    diff(a[i], b[i], `${path}/${i}`);
-                }
-                if (b.length > a.length) {
-                    for (let i = a.length; i < b.length; i++) {
-                        patches.push({ op: 'add', path: `${path}/${i}`, value: b[i] });
-                    }
-                } else if (a.length > b.length) {
-                    // Remove starting from the end to avoid shifting index problems
-                    for (let i = a.length - 1; i >= b.length; i--) {
-                        patches.push({ op: 'remove', path: `${path}/${i}` });
-                    }
-                }
-            } else if (isObject(a) && isObject(b)) {
-                const keysA = Object.keys(a);
-                const keysB = Object.keys(b);
-                
-                for (const key of keysA) {
-                    if (!b.hasOwnProperty(key)) {
-                        patches.push({ op: 'remove', path: `${path}/${escapeKey(key)}` });
-                    }
-                }
-                for (const key of keysB) {
-                    if (!a.hasOwnProperty(key)) {
-                        patches.push({ op: 'add', path: `${path}/${escapeKey(key)}`, value: _.cloneDeep(b[key]) });
-                    } else {
-                        diff(a[key], b[key], `${path}/${escapeKey(key)}`);
-                    }
-                }
-            } else {
-                patches.push({ op: 'replace', path: path, value: _.cloneDeep(b) });
-            }
-        }
-
-        diff(obj1, obj2, "");
-        return patches;
-    }
-
-    function safeAddEventListener(elem, type, listener, options) {
-        if (elem && "function" == typeof elem.addEventListener) {
+    function O(elem, type, listener, options) {
+        if (elem && "function" == typeof elem.addEventListener && "function" == typeof elem.removeEventListener) {
             elem.addEventListener(type, listener, options);
             P.push(() => elem.removeEventListener(type, listener, options));
         }
@@ -348,29 +321,48 @@ $((() => {
         P.push(() => { if (typeof eventRemoveListener === 'function') eventRemoveListener(eventName, handler); });
     }
   
-    async function loadExternalLibrary(url, globalName) {
-        if (window[globalName]) return true;
-        if (_loadingLibraries[url]) return _loadingLibraries[url];
+    // Sandboxed External Library Loader (Removes dependency on global window object)
+    async function loadExternalLibrary(url, libName) {
+        if (libName === 'jsonrepair' && local_jsonrepair) return true;
+        if (libName === 'MiniSearch' && local_MiniSearch) return true;
         
-        logger.info(`Downloading external library: ${globalName}...`);
-        _loadingLibraries[url] = new Promise((resolve) => {
-            const script = document.createElement('script');
-            script.src = url;
-            script.onload = () => { 
-                logger.info(`Library ${globalName} loaded successfully.`); 
-                delete _loadingLibraries[url];
+        if (_loadingLibraries[url]) return await _loadingLibraries[url];
+        
+        logger.info(`Downloading external library: ${libName}...`);
+        
+        _loadingLibraries[url] = (async () => {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const code = await response.text();
+                
+                const mockModule = { exports: {} };
+                // Execute code by injecting mock module & exports variables to intercept UMD/CommonJS
+                const fn = new Function('module', 'exports', code);
+                fn(mockModule, mockModule.exports);
+                
+                let exported = mockModule.exports;
+                if (exported && typeof exported !== 'function') {
+                    if (exported[libName]) exported = exported[libName];
+                    else if (exported.default) exported = exported.default;
+                }
+                
+                if (libName === 'jsonrepair') local_jsonrepair = exported;
+                if (libName === 'MiniSearch') local_MiniSearch = exported;
+                
+                logger.info(`Library ${libName} loaded successfully.`); 
                 updateUIStatus();
-                resolve(true); 
-            };
-            script.onerror = () => { 
-                logger.warn(`Failed to load script: ${url}`); 
-                delete _loadingLibraries[url];
+                return true;
+            } catch (error) {
+                logger.warn(`Failed to load script: ${url}`, error);
                 updateUIStatus();
-                resolve(false); 
-            };
-            document.head.appendChild(script);
-        });
-        return _loadingLibraries[url];
+                return false;
+            } finally {
+                delete _loadingLibraries[url];
+            }
+        })();
+        
+        return await _loadingLibraries[url];
     }
   
     function goodCopy(state) { return _.cloneDeep(state || INITIAL_STATE); }
@@ -486,6 +478,56 @@ $((() => {
         return pointer.substring(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'));
     }
 
+    // Hardcoded JSONPatch generator avoiding external library dependencies
+    function generateJSONPatch(obj1, obj2) {
+        const patches =[];
+        
+        function escapePath(str) {
+            return String(str).replace(/~/g, '~0').replace(/\//g, '~1');
+        }
+
+        function diff(a, b, path) {
+            if (a === b) return;
+            
+            if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+                if (Array.isArray(a) && Array.isArray(b)) {
+                    const minLen = Math.min(a.length, b.length);
+                    for (let i = 0; i < minLen; i++) {
+                        diff(a[i], b[i], `${path}/${i}`);
+                    }
+                    if (b.length > a.length) {
+                        for (let i = a.length; i < b.length; i++) {
+                            patches.push({ op: 'insert', path: `${path}/${i}`, value: b[i] });
+                        }
+                    } else if (a.length > b.length) {
+                        for (let i = a.length - 1; i >= b.length; i--) {
+                            patches.push({ op: 'remove', path: `${path}/${i}` });
+                        }
+                    }
+                } else if (!Array.isArray(a) && !Array.isArray(b)) {
+                    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+                    for (const key of keys) {
+                        const newPath = `${path}/${escapePath(key)}`;
+                        if (!b.hasOwnProperty(key)) {
+                            patches.push({ op: 'remove', path: newPath });
+                        } else if (!a.hasOwnProperty(key)) {
+                            patches.push({ op: 'insert', path: newPath, value: b[key] });
+                        } else {
+                            diff(a[key], b[key], newPath);
+                        }
+                    }
+                } else {
+                    patches.push({ op: 'replace', path: path, value: b });
+                }
+            } else {
+                patches.push({ op: 'replace', path: path, value: b });
+            }
+        }
+        
+        diff(obj1, obj2, '');
+        return patches;
+    }
+
     async function applyOperationsToState(operations, state, isLiveGeneration = false) {
         if (!operations || operations.length === 0) return { state, generatedDiffs:[] };
         
@@ -494,17 +536,32 @@ $((() => {
         for (const op of operations) {
             if (!op || !op.op) continue;
             try {
-                // Extended logic operators included
-                if (['add', 'replace', 'remove', 'inc', 'mul', 'push', 'addToSet', 'pull', 'pop', 'min', 'max', 'move'].includes(op.op)) {
-                    if (typeof op.path === 'string') {
-                        const pathKeys = parseJsonPointer(op.path);
+                if (['replace', 'remove', 'inc', 'mul', 'push', 'addToSet', 'pull', 'pop', 'min', 'max', 'move', 'insert', 'delta'].includes(op.op)) {
+                    let pathStr = op.path !== undefined ? op.path : op.from;
+                    if (typeof pathStr === 'string') {
+                        const pathKeys = parseJsonPointer(pathStr);
                         let currentVal = _.get(state.static, pathKeys);
                         
                         switch(op.op) {
-                            case 'add': case 'replace':
+                            case 'insert':
+                                if (pathStr.endsWith('/-')) {
+                                    const parentPath = pathStr === '/-' ? '/' : pathStr.slice(0, -2);
+                                    const parentKeys = parseJsonPointer(parentPath);
+                                    let parentVal = parentKeys.length ? _.get(state.static, parentKeys) : state.static;
+                                    if (!Array.isArray(parentVal)) { 
+                                        parentVal =[]; 
+                                        if(parentKeys.length) _.set(state.static, parentKeys, parentVal); 
+                                    }
+                                    parentVal.push(op.value);
+                                } else {
+                                    _.set(state.static, pathKeys, op.value);
+                                }
+                                break;
+                            case 'replace':
                                 _.set(state.static, pathKeys, op.value); break;
                             case 'remove': 
                                 _.unset(state.static, pathKeys); break;
+                            case 'delta':
                             case 'inc': 
                                 _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) + (Number(op.value) || 0)); break;
                             case 'mul': 
@@ -521,7 +578,7 @@ $((() => {
                                 break;
                             case 'addToSet':
                                 if (!Array.isArray(currentVal)) { currentVal =[]; _.set(state.static, pathKeys, currentVal); }
-                                const itemsToAdd = (op.value && typeof op.value === 'object' && op.value.$each && Array.isArray(op.value.$each)) ? op.value.$each : [op.value];
+                                const itemsToAdd = (op.value && typeof op.value === 'object' && op.value.$each && Array.isArray(op.value.$each)) ? op.value.$each :[op.value];
                                 itemsToAdd.forEach(item => {
                                     if (!currentVal.some(existing => _.isEqual(existing, item))) currentVal.push(item);
                                 });
@@ -552,7 +609,7 @@ $((() => {
                 } else if (op.op === 'time') {
                     if (typeof op.value === 'string') {
                         if (state.time) {
-                            const d = new Date(op.value) - new Date(state.time);
+                            var d = new Date(op.value) - new Date(state.time);
                             state.dtime = isNaN(d) ? 0 : d;
                         } else {
                             state.dtime = 0;
@@ -566,7 +623,7 @@ $((() => {
                         
                         await runSandboxedFunction(op.func_name, params, state);
                         
-                    if (isLiveGeneration && preState) {
+                        if (isLiveGeneration && preState) {
                             const diffs = generateJSONPatch(preState, state.static);
                             if (diffs && diffs.length > 0) {
                                 generatedDiffs.push(...diffs);
@@ -592,47 +649,75 @@ $((() => {
                 content = `[${content}]`;
             }
             try {
-                if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
                 
                 let textToParse = content;
-                if (typeof window.jsonrepair === 'function') {
-                    try { textToParse = window.jsonrepair(content); } catch (e) {}
+                if (local_jsonrepair) {
+                    try { textToParse = local_jsonrepair(content); } catch (e) {}
                 }
                 
                 const parsedData = JSON.parse(textToParse);
                 if (Array.isArray(parsedData)) operations.push(...parsedData);
                 else if (typeof parsedData === 'object' && parsedData !== null) operations.push(parsedData);
             } catch (e) {
-                // Graceful failure: If a single block is malformed, log it and show a warning, but continue processing the rest of the message.
-                logger.error("Skipping malformed <UpdateVariable> block due to parsing error:", e, "\nContent:", match[1]);
-                if (typeof toastr !== 'undefined') {
-                    toastr.warning("SAM: Skipped a malformed data block.", "Parsing Warning");
-                }
+                logger.error("Skipping malformed <JSONPatch> block due to parsing error:", e, "\nContent:", match[1]);
+                if (typeof toastr !== 'undefined') toastr.warning("SAM: Skipped a malformed data block.", "Parsing Warning");
             }
         }
         return operations;
     }
 
-    // --- V5 History Crawler Restored ---
+    // --- Restored & Optimized V5/V6 History Crawler ---
     async function buildStateFromHistory(targetIndex) {
         const chat = SillyTavern.getContext().chat;
         let rebuiltState = goodCopy(INITIAL_STATE);
+        let checkpointIndex = -1;
         
-        // Preserve VectorDB, Summary, Checkpoint progress from current live state
         if (samData) {
             rebuiltState.jsondb = samData.jsondb;
             rebuiltState.responseSummary = _.cloneDeep(samData.responseSummary);
             rebuiltState.summary_progress = samData.summary_progress;
         }
 
-        // Apply base data
-        const baseData = await getBaseDataFromWI();
-        if (baseData) {
-            rebuiltState.static = _.merge({}, rebuiltState.static, baseData);
+        // 1. Trace BACKWARDS to find the latest Checkpoint (V6 or V5)
+        for (let i = targetIndex; i >= 0; i--) {
+            const msg = chat[i];
+            if (!msg || msg.is_user) continue;
+            
+            // Try V6 Checkpoint
+            const v6Match = msg.mes.match(CHECKPOINT_REGEX);
+            if (v6Match && v6Match[1]) {
+                try { 
+                    const parsed = JSON.parse(v6Match[1].trim());
+                    rebuiltState = _.merge({}, rebuiltState, parsed);
+                    checkpointIndex = i; 
+                    break; 
+                } catch (e) {}
+            }
+            
+            // Try V5 Legacy Checkpoint
+            const v5Match = msg.mes.match(OLD_STATE_PARSE_REGEX);
+            if (v5Match && v5Match[1]) {
+                try { 
+                    const parsed = JSON.parse(v5Match[1].trim());
+                    rebuiltState = _.merge({}, rebuiltState, parsed);
+                    checkpointIndex = i; 
+                    break; 
+                } catch (e) {}
+            }
         }
 
+        // 2. Load Base Data if no checkpoint found
+        if (checkpointIndex === -1 && targetIndex >= 0) {
+            const baseData = await getBaseDataFromWI();
+            if (baseData) rebuiltState.static = _.merge({}, rebuiltState.static, baseData);
+        }
+
+        // 3. Trace FORWARD from the checkpoint
+        const startIndex = checkpointIndex === -1 ? 0 : checkpointIndex + 1;
         const limit = Math.min(targetIndex, chat.length - 1);
-        for (let i = 0; i <= limit; i++) {
+        
+        for (let i = startIndex; i <= limit; i++) {
             const msg = chat[i];
             if (!msg || msg.is_user) continue;
             
@@ -675,7 +760,12 @@ $((() => {
         if (msgs.length === 0) return false;
         
         const contentStr = msgs.map(m => {
-            let processed = m.mes.replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim();
+            // Stripping all update blocks and legacy checkpoint blocks prior to prompt insertion
+            let processed = m.mes
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '')
+                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
+                .trim();
             samSettings.regexes.forEach(rx => { if(rx.enabled && rx.regex_body) try { processed = processed.replace(new RegExp(rx.regex_body, 'g'), ''); }catch(e){} });
             return `${m.name}: ${processed}`;
         }).join('\n');
@@ -699,7 +789,7 @@ $((() => {
   
         const dbOperations = await extractOperationsFromText(resultL2);
         for (const op of dbOperations) {
-            if (op.op === 'add' && op.path && op.value && typeof op.value.content === 'string') {
+            if (op.op === 'insert' && op.path && op.value && typeof op.value.content === 'string') {
                 const pathParts = op.path.split('/');
                 const key = pathParts[pathParts.length - 1];
                 if (key) {
@@ -752,18 +842,35 @@ $((() => {
         const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state, true);
         samData = newState;
         
-        // Append dynamically generated function diffs back into the variable update block to safely persist state.
+        let contentUpdated = false;
+
         if (generatedDiffs && generatedDiffs.length > 0) {
             const updatedOps =[...opsFromMessage, ...generatedDiffs];
             const newBlockContent = JSON.stringify(updatedOps, null, 2);
             
             UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0;
             if (UPDATE_BLOCK_EXTRACT_REGEX.test(messageContent)) {
-                messageContent = messageContent.replace(UPDATE_BLOCK_REMOVE_REGEX, `<UpdateVariable>\n${newBlockContent}\n</UpdateVariable>`);
+                messageContent = messageContent.replace(UPDATE_BLOCK_REMOVE_REGEX, `<JSONPatch>\n${newBlockContent}\n</JSONPatch>`);
             } else {
-                messageContent += `\n<UpdateVariable>\n${newBlockContent}\n</UpdateVariable>`;
+                messageContent += `\n<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
             }
-            
+            contentUpdated = true;
+        }
+
+        // Restored Checkpoint Logic
+        const currentRound = chat.filter(m => !m.is_user).length;
+        const shouldCheckpoint = samSettings.enable_auto_checkpoint && 
+                                 samSettings.auto_checkpoint_frequency > 0 && 
+                                 (currentRound > 0 && currentRound % samSettings.auto_checkpoint_frequency === 0);
+
+        if (shouldCheckpoint) {
+            const stateString = await chunkedStringify(samData);
+            const checkpointBlock = `\n\n${CHECKPOINT_MARKER}\n<SAMCheckpoint>\n${stateString}\n</SAMCheckpoint>`;
+            messageContent += checkpointBlock;
+            contentUpdated = true;
+        }
+
+        if (contentUpdated) {
             chat[index].mes = messageContent;
             await TavernHelper.setChatMessages([{ message_id: index, message: messageContent }]);
         }
@@ -802,7 +909,7 @@ $((() => {
     const pushEvent = (ev) => { event_queue.push(ev); unified_dispatch_executor(); };
   
     // ========================================================================
-    // 8. 内部悬浮窗 UI & 样式构建 (原生 JS)
+    // 8. 内部悬浮窗 UI & 样式构建
     // ========================================================================
     function updateUIStatus() {
         if (k.statusText) {
@@ -810,17 +917,18 @@ $((() => {
             k.statusText.style.color =["PROCESSING", "SUMMARIZING"].includes(curr_state) ? "#f0ad4e" : "#5cb85c";
         }
         if (k.depsText) {
-            const jr = typeof window.jsonrepair === 'function' ? 'green' : 'red';
-            const ms = typeof window.MiniSearch === 'function' ? 'green' : 'red';
+            const jr = local_jsonrepair ? 'green' : 'red';
+            const ms = local_MiniSearch ? 'green' : 'red';
+            const jp = 'green'; // Hardcoded module avoids external dependencies
             
-        k.depsText.innerHTML = `
+            k.depsText.innerHTML = `
                 <div class="sam_dep_indicator" title="jsonrepair"><div class="sam_dep_dot ${jr}"></div></div>
                 <div class="sam_dep_indicator" title="MiniSearch"><div class="sam_dep_dot ${ms}"></div></div>
+                <div class="sam_dep_indicator" title="jsonpatch"><div class="sam_dep_dot ${jp}"></div></div>
             `;
         }
     }
 
-    // --- Start of UI Dragging & Positioning Logic (from reference) ---
     function Ce(val, min, max, defaultVal) {
         const o = Number(val);
         return Number.isFinite(o) ? Math.min(max, Math.max(min, o)) : defaultVal;
@@ -832,8 +940,8 @@ $((() => {
         const width = UI_STATE.panelOpen ? (k.widget.offsetWidth || 800) : fabSize;
         const height = UI_STATE.panelOpen ? (k.widget.offsetHeight || 600) : fabSize;
         
-        const maxLeft = Math.max(8, window.innerWidth - width - 8);
-        const maxTop = Math.max(8, window.innerHeight - height - 8);
+        const maxLeft = Math.max(8, y.innerWidth - width - 8);
+        const maxTop = Math.max(8, y.innerHeight - height - 8);
         
         const safeLeft = Ce(leftTarget, 8, maxLeft, 8);
         const safeTop = Ce(topTarget, 8, maxTop, 8);
@@ -859,7 +967,6 @@ $((() => {
         UI_STATE.uiLeft = rect.left;
         UI_STATE.uiTop = rect.top;
     }
-    // --- End of UI Dragging & Positioning Logic ---
   
     function Nn() {
         if (!v.head) return;
@@ -868,8 +975,8 @@ $((() => {
         styleNode.id = STYLE_ID;
         styleNode.textContent = `
           #${WIDGET_ID} { position: fixed; z-index: 99997; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
-          #${WIDGET_ID} .th-asr-fab { width: 48px; height: 48px; border: none; border-radius: 14px; cursor: move; color: white; background: linear-gradient(135deg, #0f766e, #0f172a); box-shadow: 0 8px 20px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; touch-action: none; }
-          #${WIDGET_ID} .th-asr-fab:hover { transform: translateY(-2px) scale(1.05); }
+          #${WIDGET_ID} .th-asr-fab { width: 48px; height: 48px; border: none; border-radius: 14px; cursor: pointer; color: white; background: linear-gradient(135deg, #0f766e, #0f172a); box-shadow: 0 8px 20px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; touch-action: none; transition: transform 0.16s ease, box-shadow 0.16s ease; }
+          #${WIDGET_ID} .th-asr-fab:hover { transform: translateY(-1px) scale(1.02); box-shadow: 0 10px 24px rgba(0,0,0,0.5); }
           #${WIDGET_ID} .th-asr-panel { margin-top: 10px; width: 800px; max-height: 90vh; border-radius: 8px; background: #1e1e1e; border: 1px solid #333; box-shadow: 0 16px 36px rgba(0,0,0,0.6); display: flex; flex-direction: column; overflow: hidden; color: #ddd; }
           #${WIDGET_ID} .th-asr-panel[hidden] { display: none !important; }
           .sam_modal_header { background: #252526; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #333; user-select: none; touch-action: none; }
@@ -1047,6 +1154,11 @@ $((() => {
                   <label class="sam_label" style="display:inline-block; margin-right:10px;">摘要生成时跳过世界信息</label>
                   <div class="sam_toggle" id="toggle_skip"><div class="sam_toggle_track ${samSettings.skipWIAN_When_summarizing?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
               </div>
+              <div class="sam_form_row">
+                  <label class="sam_label" style="display:inline-block; margin-right:10px;">启用自动检查点写入</label>
+                  <div class="sam_toggle" id="toggle_checkpoint"><div class="sam_toggle_track ${samSettings.enable_auto_checkpoint?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
+              </div>
+              <div class="sam_form_row"><label class="sam_label">检查点频率 (回合数)</label><input class="sam_input" type="number" id="sam_checkpoint_freq" value="${samSettings.auto_checkpoint_frequency}"></div>
               <div class="sam_actions" style="margin-top:20px;"><button class="sam_btn sam_btn_primary" id="btn_save_global">保存全局设置</button></div>
               <hr style="border-color: #333; margin: 20px 0;">
               <h3>导入 / 导出</h3>
@@ -1077,9 +1189,9 @@ $((() => {
                     try { 
                         parsed = JSON.parse(text); 
                     } catch(e) { 
-                        if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                        if (typeof window.jsonrepair === 'function') {
-                            parsed = JSON.parse(window.jsonrepair(text));
+                        if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                        if (local_jsonrepair) {
+                            parsed = JSON.parse(local_jsonrepair(text));
                         } else {
                             throw new Error("JSON invalid & jsonrepair fallback not available.");
                         }
@@ -1128,7 +1240,11 @@ $((() => {
         else if (T === 'SETTINGS') {
             C.querySelector('#toggle_data').onclick = () => { samSettings.data_enable = !samSettings.data_enable; renderTabContent(); };
             C.querySelector('#toggle_skip').onclick = () => { samSettings.skipWIAN_When_summarizing = !samSettings.skipWIAN_When_summarizing; renderTabContent(); };
-            C.querySelector('#btn_save_global').onclick = () => { saveSamSettings(); toastr.success("设置已保存"); };
+            C.querySelector('#toggle_checkpoint').onclick = () => { samSettings.enable_auto_checkpoint = !samSettings.enable_auto_checkpoint; renderTabContent(); };
+            C.querySelector('#btn_save_global').onclick = () => { 
+                samSettings.auto_checkpoint_frequency = parseInt(C.querySelector('#sam_checkpoint_freq').value) || 20;
+                saveSamSettings(); toastr.success("设置已保存"); 
+            };
             C.querySelector('#btn_export').onclick = () => {
                 const settingsToExport = _.cloneDeep(samSettings);
                 delete settingsToExport.api_presets;
@@ -1241,13 +1357,23 @@ $((() => {
         }
     }
   
+    function togglePanel(open, initial = false) {
+        if (!k.panel) return;
+        if (UI_STATE.panelOpen === open && !initial) return;
+        UI_STATE.panelOpen = open;
+        k.panel.hidden = !open;
+        if (open) {
+            renderTabContent();
+        }
+        An();
+    }
+
     function buildWidgetHTML() {
         try {
             if (!v.body) return false;
             if (v.getElementById(WIDGET_ID)) v.getElementById(WIDGET_ID).remove();
             
             const c = v.createElement("div"); c.id = WIDGET_ID;
-            c.style.display = 'block';
             c.innerHTML = `
               <button class="th-asr-fab" title="${APP_NAME}">
                 <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
@@ -1287,13 +1413,17 @@ $((() => {
             
             if (!k.widget || !k.panel || !k.fab || !k.header) throw new Error("Missing Elements");
             
-            // --- Event Binding ---
-            safeAddEventListener(k.fab, "click", () => { if ("1" !== k.widget.dataset.dragging) togglePanel(!UI_STATE.panelOpen); });
-            safeAddEventListener(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
-            safeAddEventListener(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(true); renderTabContent(); toastr.info("数据已重载"); });
+            // 1. Click to toggle
+            O(k.fab, "click", () => {
+                if ("1" !== k.widget?.dataset?.dragging) {
+                    togglePanel(!UI_STATE.panelOpen);
+                }
+            });
+            O(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
+            O(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(true); renderTabContent(); toastr.info("数据已重载"); });
             
             c.querySelectorAll('.sam_tab').forEach(tab => {
-                safeAddEventListener(tab, "click", (e) => {
+                O(tab, "click", (e) => {
                     c.querySelectorAll('.sam_tab').forEach(t=>t.classList.remove('active'));
                     tab.classList.add('active');
                     UI_STATE.activeTab = tab.dataset.tab;
@@ -1301,91 +1431,87 @@ $((() => {
                 });
             });
 
-            // --- Drag Logic from Reference ---
-            const dragState = { active: false, pointerId: null, startX: 0, startY: 0, originLeft: 0, originTop: 0 };
-            
-            function isInteractive(node) { return !!node.closest("button,input,textarea,select,.sam_toggle"); }
-
-            function onPointerDown(e) {
-                if (e.pointerType === "mouse" && e.button !== 0) return;
-                if (e.currentTarget === k.header && isInteractive(e.target)) return;
+            // 3. Exact Drag Logic matching reference
+            (function () {
+                if (!k.widget || !k.fab || !k.header) return;
                 
-                const rect = k.widget.getBoundingClientRect();
-                dragState.active = true;
-                dragState.pointerId = Number.isFinite(e.pointerId) ? e.pointerId : null;
-                dragState.startX = e.clientX;
-                dragState.startY = e.clientY;
-                dragState.originLeft = rect.left;
-                dragState.originTop = rect.top;
-                k.widget.dataset.dragging = "0";
+                const dragState = { active: false, pointerId: null, startX: 0, startY: 0, originLeft: 0, originTop: 0, moved: false };
                 
-                if (typeof e.currentTarget.setPointerCapture === "function" && dragState.pointerId !== null) {
-                    try { e.currentTarget.setPointerCapture(dragState.pointerId); } catch (err) {}
+                function isInteractive(node) {
+                    return !!node && typeof node.closest === "function" && !!node.closest("button, input, select, textarea, label, a, .sam_toggle");
                 }
-                e.preventDefault();
-            }
-
-            function onPointerMove(e) {
-                if (!dragState.active || (dragState.pointerId !== null && e.pointerId !== dragState.pointerId)) return;
-                
-                const dx = e.clientX - dragState.startX;
-                const dy = e.clientY - dragState.startY;
-                
-                if (Math.abs(dx) + Math.abs(dy) > 4) k.widget.dataset.dragging = "1";
-                Tn(dragState.originLeft + dx, dragState.originTop + dy, false);
-            }
-
-            function onPointerUp(e) {
-                if (dragState.active) {
-                    if (dragState.pointerId !== null && e && Number.isFinite(e.pointerId) && e.pointerId !== dragState.pointerId) return;
-                    dragState.active = false;
-                    dragState.pointerId = null;
-                    En(); // Save the final position
-                    setTimeout(() => { if (k.widget) k.widget.dataset.dragging = "0"; }, 50);
+    
+                function onPointerDown(n) {
+                    if ("mouse" === n.pointerType && 0 !== n.button) return;
+                    if (n.currentTarget === k.header && isInteractive(n.target)) return;
+                    
+                    const rect = k.widget.getBoundingClientRect();
+                    dragState.active = true;
+                    dragState.pointerId = Number.isFinite(n.pointerId) ? n.pointerId : null;
+                    dragState.startX = n.clientX;
+                    dragState.startY = n.clientY;
+                    dragState.originLeft = rect.left;
+                    dragState.originTop = rect.top;
+                    dragState.moved = false;
+                    k.widget.dataset.dragging = "0";
+                    
+                    if (typeof n.currentTarget?.setPointerCapture === "function" && null !== dragState.pointerId) {
+                        try { n.currentTarget.setPointerCapture(dragState.pointerId); } catch (err) {}
+                    }
+                    n.preventDefault();
                 }
-            }
-
-            safeAddEventListener(k.fab, "pointerdown", onPointerDown);
-            safeAddEventListener(k.header, "pointerdown", onPointerDown);
-            safeAddEventListener(v, "pointermove", onPointerMove);
-            safeAddEventListener(v, "pointerup", onPointerUp);
-            safeAddEventListener(v, "pointercancel", onPointerUp);
+    
+                function onPointerMove(t) {
+                    if (!dragState.active) return;
+                    if (null !== dragState.pointerId && t.pointerId !== dragState.pointerId) return;
+                    
+                    const dx = t.clientX - dragState.startX;
+                    const dy = t.clientY - dragState.startY;
+                    
+                    if (Math.abs(dx) + Math.abs(dy) > 4) {
+                        dragState.moved = true;
+                        k.widget.dataset.dragging = "1";
+                    }
+                    Tn(dragState.originLeft + dx, dragState.originTop + dy, false);
+                }
+    
+                function onPointerUp(t) {
+                    if (dragState.active) {
+                        if (null !== dragState.pointerId && t && Number.isFinite(t.pointerId) && t.pointerId !== dragState.pointerId) return;
+                        dragState.active = false;
+                        dragState.pointerId = null;
+                        En();
+                        setTimeout(() => {
+                            if (k.widget) k.widget.dataset.dragging = "0";
+                        }, 0);
+                    }
+                }
+    
+                O(k.fab, "pointerdown", onPointerDown);
+                O(k.header, "pointerdown", onPointerDown);
+                O(v, "pointermove", onPointerMove);
+                O(v, "pointerup", onPointerUp);
+                O(v, "pointercancel", onPointerUp);
+            })();
             
-            // --- Initialization ---
+            // 4. Initialization
             togglePanel(UI_STATE.panelOpen, true);
-            if (UI_STATE.uiLeft === null || UI_STATE.uiTop === null) {
+            if (null === UI_STATE.uiLeft || null === UI_STATE.uiTop) {
                 const fabSize = UI_STATE.fabSizePx;
                 const padding = 16;
-                const defaultLeft = window.innerWidth - fabSize - padding;
-                const defaultTop = Math.max(padding, Math.min(window.innerHeight - fabSize - padding, 120));
+                const defaultLeft = y.innerWidth - fabSize - padding;
+                const defaultTop = Math.max(padding, Math.min(y.innerHeight - fabSize - padding, 120));
                 Tn(defaultLeft, defaultTop, true);
             } else {
                 Tn(UI_STATE.uiLeft, UI_STATE.uiTop, true);
             }
-            safeAddEventListener(window, "resize", () => { An(); En(); });
+            O(y, "resize", () => { An(); En(); });
 
             return true;
         } catch (e) {
             logger.error("Widget creation failed:", e);
             return false;
         }
-    }
-  
-    function togglePanel(open, initial = false) {
-        if (!k.panel) return;
-        if (UI_STATE.panelOpen === open && !initial) return;
-        UI_STATE.panelOpen = open;
-        k.panel.hidden = !open;
-        if (open) {
-            renderTabContent();
-            setTimeout(() => {
-                if (k.panel && k.panel.offsetWidth === 0 && !k.panel.hidden) {
-                    logger.error("Panel layout broken / failed to display dimensions. Committing suicide.");
-                    cleanupDOM();
-                }
-            }, 100);
-        }
-        An();
     }
   
     // ========================================================================
@@ -1436,6 +1562,49 @@ $((() => {
         await initializeDatabase(samData.jsondb);
         updateUIStatus();
     }
+
+    // Manual Event Triggers corresponding to custom UI Buttons
+    async function manualCheckpoint() {
+        if (isCheckpointing || curr_state !== STATES.IDLE) return;
+        isCheckpointing = true;
+        try {
+            const chat = SillyTavern.getContext().chat;
+            let lastAiIndex = -1;
+            for (let i = chat.length - 1; i >= 0; i--) {
+                if (chat[i] && !chat[i].is_user) { lastAiIndex = i; break; }
+            }
+            if (lastAiIndex === -1) return;
+            
+            const stateString = await chunkedStringify(samData);
+            const checkpointBlock = `\n\n${CHECKPOINT_MARKER}\n<SAMCheckpoint>\n${stateString}\n</SAMCheckpoint>`;
+            
+            chat[lastAiIndex].mes += checkpointBlock;
+            await TavernHelper.setChatMessages([{ message_id: lastAiIndex, message: chat[lastAiIndex].mes }]);
+            toastr.success("手动检查点已创建 (SAM Checkpoint created)");
+        } catch(e) {
+            logger.error("Manual checkpoint failed", e);
+            toastr.error("检查点创建失败");
+        } finally {
+            isCheckpointing = false;
+        }
+    }
+
+    async function manualReset() {
+        try {
+            const chatLen = SillyTavern.getContext().chat.length;
+            let targetIndex = chatLen - 1;
+            while (targetIndex >= 0 && SillyTavern.getContext().chat[targetIndex].is_user) {
+                targetIndex--;
+            }
+            if (targetIndex < 0) targetIndex = 0;
+            samData = await buildStateFromHistory(targetIndex);
+            SillyTavern.getContext().variables.local.set("SAM_data", samData);
+            toastr.success("SAM 内部状态已重置 (State reset)");
+        } catch(e) {
+            logger.error("Manual reset failed", e);
+            toastr.error("状态重置失败");
+        }
+    }
   
     async function initSAM() {
         if (typeof tavern_events === 'undefined') { logger.warn("Not in ST environment."); return; }
@@ -1457,6 +1626,15 @@ $((() => {
         bindTavernEvent(tavern_events.MESSAGE_DELETED, async () => { await loadContextData(true); });
         bindTavernEvent(tavern_events.MESSAGE_EDITED, async () => { await loadContextData(true); });
         bindTavernEvent(tavern_events.CHAT_CHANGED, async () => { await loadContextData(true); });
+
+        try {
+            if (typeof getButtonEvent === 'function' && typeof eventOn === 'function') {
+                const resetEvent = getButtonEvent("重置内部状态（慎用）");
+                const checkpointEvent = getButtonEvent("手动检查点");
+                if (resetEvent) eventOn(resetEvent, manualReset);
+                if (checkpointEvent) eventOn(checkpointEvent, manualCheckpoint);
+            }
+        } catch (e) {}
   
         await loadContextData(true); // Always force rebuild on initial load to guarantee sync
         
@@ -1467,7 +1645,7 @@ $((() => {
         initSAM();
     };
     
-    if (v.readyState === "loading") { safeAddEventListener(v, "DOMContentLoaded", startup, { once: true }); } 
+    if (v.readyState === "loading") { O(v, "DOMContentLoaded", startup, { once: true }); } 
     else { startup(); }
   
   })());
