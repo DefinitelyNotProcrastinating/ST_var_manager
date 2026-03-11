@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SAM Core Engine - Fully Integrated (Refactored)
-// @version      6.2.4
+// @version      6.2.9
 // @description  SAM engine refactored to use RFC 6902 (JSON Patch) for all state operations, enhancing robustness and structure.
 // @author       SAM Extension Team
 // @match        *://*/*
@@ -18,17 +18,20 @@ $((() => {
     const WIDGET_ID = "sam-core-widget-root";
     const APP_NAME = "SAM 核心管理器";
     
-    const SCRIPT_VERSION = "6.2.4 'Lone star'";
-    const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
+    const SCRIPT_VERSION = "6.2.9 'Lone star'";
+    const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair@3.13.3/lib/umd/jsonrepair.min.js";
     const MINISEARCH_URL = "https://cdn.jsdelivr.net/npm/minisearch@6.3.0/dist/umd/index.min.js";
     const JSON_PATCH_URL = "https://cdn.jsdelivr.net/npm/fast-json-patch@3.1.1/index.min.js";
-    
+
+    var JSONRepairObj = null;
+    var MiniSearchObj = null;
+
     // Regex to find and extract content from <UpdateVariable> blocks.
     const UPDATE_BLOCK_EXTRACT_REGEX = /<UpdateVariable>([\s\S]*?)<\/UpdateVariable>/gim;
     const UPDATE_BLOCK_REMOVE_REGEX = /<UpdateVariable>[\s\S]*?<\/UpdateVariable>/gim;
     
     const INITIAL_STATE = { 
-        static: {}, time: "", volatile:[], 
+        static: {}, time: "", dtime: 0, volatile:[], 
         responseSummary: { L1:[], L2: [], L3:[] }, 
         summary_progress: 0,
         jsondb: null,
@@ -37,6 +40,7 @@ $((() => {
     
     const STATES = { IDLE: "IDLE", AWAIT_GENERATION: "AWAIT_GENERATION", PROCESSING: "PROCESSING", SUMMARIZING: "SUMMARIZING" };
     const SAM_FUNCTIONLIB_ID = "__SAM_IDENTIFIER__";
+    const SAM_BASEDATA_ID = "__SAM_base_data__";
     const MODULE_NAME = 'sam_extension';
   
     // API Sources Constants
@@ -70,29 +74,28 @@ $((() => {
         },
         skipWIAN_When_summarizing: false,
         regexes:[],
-        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用 RFC 6902 JSON Patch 格式，并包裹在 <UpdateVariable> 标签内。例如:\n<UpdateVariable>\n{ "op": "add", "path": "/unique_key", "value": { "content": "详细描述", "keywords": ["关键词1"] } }\n</UpdateVariable>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <UpdateVariable> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
+        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用我们扩展的 JSON Patch 格式，并包裹在 <UpdateVariable> 标签内。支持的op包含: add, replace, remove, inc, mul, push, addToSet, pull, pop, min, max, move。例如:\n<UpdateVariable>\n{ "op": "inc", "path": "/gold", "value": 10 }\n</UpdateVariable>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <UpdateVariable> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
         summary_prompt_L3: `You are a summarization expert. Review the following list of sequential event summaries (L2 summaries). Your task is to condense them into a single, high-level narrative paragraph (an L3 summary). Focus on the most significant developments.\n\n---\n**Summaries to Condense:**\n{{summary_content}}\n---`
     };
   
     // ========================================================================
     // 2. 环境解析与全局实例清理
     // ========================================================================
-    const y = (function () { try { if (window.top && window.top.document) return window.top; } catch (err) {} return window; })();
-    const v = (function (contextWindow) { try { if (contextWindow && contextWindow.document) return contextWindow.document; } catch (err) {} return document; })(y);
+    const v = (function (contextWindow) { try { if (contextWindow && contextWindow.document) return contextWindow.document; } catch (err) {} return document; })(window);
     
     // UI 内部状态引用声明
-    const k = { widget: null, panel: null, fab: null, header: null, contentArea: null, statusText: null };
+    const k = { widget: null, panel: null, fab: null, header: null, contentArea: null, statusText: null, depsText: null };
 
     function cleanupDOM() {
         try {
             const w = v.getElementById(WIDGET_ID); if (w) w.remove();
             const s = v.getElementById(STYLE_ID); if (s) s.remove();
-            k.widget = null; k.panel = null; k.fab = null; k.header = null; k.contentArea = null; k.statusText = null;
+            k.widget = null; k.panel = null; k.fab = null; k.header = null; k.contentArea = null; k.statusText = null; k.depsText = null;
         } catch(e) {}
     }
 
-    if (y[INSTANCE_KEY] && "function" == typeof y[INSTANCE_KEY].stop) {
-      try { y[INSTANCE_KEY].stop(); } catch (err) {}
+    if (window[INSTANCE_KEY] && "function" == typeof window[INSTANCE_KEY].stop) {
+      try { window[INSTANCE_KEY].stop(); } catch (err) {}
     }
     cleanupDOM();
   
@@ -141,16 +144,22 @@ $((() => {
             this.miniSearch = null;
             this.documentMap = new Map();
             this.isInitialized = false;
-            this.miniSearchConfig = { fields: ['key', 'keywords'], storeFields: ['key'], idField: 'key' };
+            this.miniSearchConfig = { fields:['key', 'keywords'], storeFields: ['key'], idField: 'key' };
         }
         async init() {
             if (!this.isEnabled || this.isInitialized) return this.isInitialized;
             try {
-                if (typeof y.MiniSearch !== 'function') await loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
-                this.miniSearch = new y.MiniSearch(this.miniSearchConfig);
-                this.isInitialized = true;
-                return true;
-            } catch (error) { logger.shoutError("DB init failed.", error); this.isEnabled = false; return false; }
+                if (typeof window.MiniSearch !== 'function') await loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
+                if (typeof window.MiniSearch === 'function') {
+                    this.miniSearch = new window.MiniSearch(this.miniSearchConfig);
+                    this.isInitialized = true;
+                    return true;
+                } else {
+                    logger.warn("DB init skipped: MiniSearch library not available.");
+                    this.isEnabled = false;
+                    return false;
+                }
+            } catch (error) { logger.warn("DB init failed.", error); this.isEnabled = false; return false; }
         }
         _checkReady() { return this.isEnabled && this.isInitialized; }
         setMemo(key, content, keywords =[]) {
@@ -180,12 +189,12 @@ $((() => {
             if (!this.isEnabled) return false;
             try {
                 const data = JSON.parse(jsonString);
-                if (typeof y.MiniSearch.loadJSON !== 'function') throw new Error("MiniSearch not fully loaded.");
-                this.miniSearch = y.MiniSearch.loadJSON(JSON.stringify(data.miniSearchIndex), this.miniSearchConfig);
+                if (typeof window.MiniSearch.loadJSON !== 'function') throw new Error("MiniSearch not fully loaded.");
+                this.miniSearch = window.MiniSearch.loadJSON(JSON.stringify(data.miniSearchIndex), this.miniSearchConfig);
                 this.documentMap = new Map(Object.entries(data.documentMap));
                 this.isInitialized = true;
                 return true;
-            } catch (error) { logger.shoutError("DB import failed.", error); return false; }
+            } catch (error) { logger.warn("DB import failed.", error); return false; }
         }
     }
   
@@ -271,7 +280,63 @@ $((() => {
     // ========================================================================
     // 6. 基础工具与状态操作函数 (Refactored Core)
     // ========================================================================
-    function O(elem, type, listener, options) {
+
+    function generateJSONPatch(obj1, obj2) {
+        const patches =[];
+        
+        function escapeKey(key) {
+            return String(key).replace(/~/g, '~0').replace(/\//g, '~1');
+        }
+        
+        function isObject(val) {
+            return val !== null && typeof val === 'object' && !Array.isArray(val);
+        }
+
+        function diff(a, b, path) {
+            // Using lodash (_) which is already heavily used in your script
+            if (_.isEqual(a, b)) return;
+
+            if (Array.isArray(a) && Array.isArray(b)) {
+                const minLen = Math.min(a.length, b.length);
+                for (let i = 0; i < minLen; i++) {
+                    diff(a[i], b[i], `${path}/${i}`);
+                }
+                if (b.length > a.length) {
+                    for (let i = a.length; i < b.length; i++) {
+                        patches.push({ op: 'add', path: `${path}/${i}`, value: b[i] });
+                    }
+                } else if (a.length > b.length) {
+                    // Remove starting from the end to avoid shifting index problems
+                    for (let i = a.length - 1; i >= b.length; i--) {
+                        patches.push({ op: 'remove', path: `${path}/${i}` });
+                    }
+                }
+            } else if (isObject(a) && isObject(b)) {
+                const keysA = Object.keys(a);
+                const keysB = Object.keys(b);
+                
+                for (const key of keysA) {
+                    if (!b.hasOwnProperty(key)) {
+                        patches.push({ op: 'remove', path: `${path}/${escapeKey(key)}` });
+                    }
+                }
+                for (const key of keysB) {
+                    if (!a.hasOwnProperty(key)) {
+                        patches.push({ op: 'add', path: `${path}/${escapeKey(key)}`, value: _.cloneDeep(b[key]) });
+                    } else {
+                        diff(a[key], b[key], `${path}/${escapeKey(key)}`);
+                    }
+                }
+            } else {
+                patches.push({ op: 'replace', path: path, value: _.cloneDeep(b) });
+            }
+        }
+
+        diff(obj1, obj2, "");
+        return patches;
+    }
+
+    function safeAddEventListener(elem, type, listener, options) {
         if (elem && "function" == typeof elem.addEventListener) {
             elem.addEventListener(type, listener, options);
             P.push(() => elem.removeEventListener(type, listener, options));
@@ -284,13 +349,26 @@ $((() => {
     }
   
     async function loadExternalLibrary(url, globalName) {
-        if (y[globalName]) return;
+        if (window[globalName]) return true;
         if (_loadingLibraries[url]) return _loadingLibraries[url];
-        _loadingLibraries[url] = new Promise((resolve, reject) => {
-            const script = v.createElement('script'); script.src = url;
-            script.onload = () => { delete _loadingLibraries[url]; resolve(); };
-            script.onerror = (err) => { delete _loadingLibraries[url]; reject(err); };
-            v.head.appendChild(script);
+        
+        logger.info(`Downloading external library: ${globalName}...`);
+        _loadingLibraries[url] = new Promise((resolve) => {
+            const script = document.createElement('script');
+            script.src = url;
+            script.onload = () => { 
+                logger.info(`Library ${globalName} loaded successfully.`); 
+                delete _loadingLibraries[url];
+                updateUIStatus();
+                resolve(true); 
+            };
+            script.onerror = () => { 
+                logger.warn(`Failed to load script: ${url}`); 
+                delete _loadingLibraries[url];
+                updateUIStatus();
+                resolve(false); 
+            };
+            document.head.appendChild(script);
         });
         return _loadingLibraries[url];
     }
@@ -304,6 +382,7 @@ $((() => {
         samSettings = extensionSettings[MODULE_NAME];
         return samSettings;
     }
+    
     function saveSamSettings() {
         const { extensionSettings, saveSettingsDebounced } = SillyTavern.getContext();
         extensionSettings[MODULE_NAME] = samSettings;
@@ -334,6 +413,18 @@ $((() => {
             const funcEntry = Object.values(wiData?.entries || {}).find(e => e.comment === SAM_FUNCTIONLIB_ID);
             return funcEntry && funcEntry.content ? JSON.parse(funcEntry.content) :[];
         } catch (e) { return[]; }
+    }
+    
+    async function getBaseDataFromWI() {
+        try {
+            const characterId = SillyTavern.getContext().characterId;
+            if (characterId === null || characterId < 0) return null;
+            const worldInfoName = SillyTavern.getContext().characters[characterId]?.data?.extensions?.world;
+            if (!worldInfoName) return null;
+            const wiData = await SillyTavern.getContext().loadWorldInfo(worldInfoName);
+            const baseDataEntry = Object.values(wiData?.entries || {}).find(e => e.comment === SAM_BASEDATA_ID);
+            return baseDataEntry && baseDataEntry.content ? JSON.parse(baseDataEntry.content) : null;
+        } catch (e) { return null; }
     }
     
     async function saveFunctionsToWI(functions) {
@@ -372,7 +463,7 @@ $((() => {
             else formalParamNames.push(param); 
         }
         let bodyPrologue = restParamName ? `const ${restParamName} = Array.from(arguments).slice(${4 + formalParamNames.length});\n` : '';
-        const fetchImpl = funcDef.network_access ? y.fetch.bind(y) : () => { throw new Error('Network disabled'); };
+        const fetchImpl = funcDef.network_access ? window.fetch.bind(window) : () => { throw new Error('Network disabled'); };
         
         const execPromise = new Promise(async (resolve, reject) => {
             try {
@@ -383,7 +474,6 @@ $((() => {
         try { 
             await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); } 
         catch(e) { 
-            logger.shoutError(`Func Error:`, e);
             logger.error(`Function "${funcName}" execution failed:`, e);
         }
     }
@@ -396,62 +486,96 @@ $((() => {
         return pointer.substring(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'));
     }
 
-    async function applyOperationsToState(operations, state) {
+    async function applyOperationsToState(operations, state, isLiveGeneration = false) {
         if (!operations || operations.length === 0) return { state, generatedDiffs:[] };
         
         let generatedDiffs =[];
         
         for (const op of operations) {
-            if (!op || typeof op.op !== 'string') continue;
+            if (!op || !op.op) continue;
             try {
-                switch (op.op) {
-                    case 'add':
-                    case 'replace':
-                        if (typeof op.path === 'string') {
-                            const pathKeys = parseJsonPointer(op.path);
-                            _.set(state.static, pathKeys, op.value);
-                        }
-                        break;
-                    case 'remove':
-                        if (typeof op.path === 'string') {
-                            const pathKeys = parseJsonPointer(op.path);
-                            _.unset(state.static, pathKeys);
-                        }
-                        break;
-                    case 'time':
-                        if (typeof op.value === 'string') {
-                            state.time = op.value;
-                        }
-                        break;
-                    case 'func':
-                        if (typeof op.func_name === 'string') {
-                            const params = Array.isArray(op.params) ? op.params :[];
-                            
-                            // Snapshot static state before running custom function
-                            const preState = goodCopy(state.static);
-                            
-                            // Run function which modifies state
-                            await runSandboxedFunction(op.func_name, params, state);
-                            
-                            // Generate diff of the state changes to append back
-                            if (typeof y.jsonpatch === 'undefined') {
-                                await loadExternalLibrary(JSON_PATCH_URL, 'jsonpatch');
-                            }
-                            if (y.jsonpatch && typeof y.jsonpatch.compare === 'function') {
-                                const diffs = y.jsonpatch.compare(preState, state.static);
-                                if (diffs && diffs.length > 0) {
-                                    generatedDiffs.push(...diffs);
+                // Extended logic operators included
+                if (['add', 'replace', 'remove', 'inc', 'mul', 'push', 'addToSet', 'pull', 'pop', 'min', 'max', 'move'].includes(op.op)) {
+                    if (typeof op.path === 'string') {
+                        const pathKeys = parseJsonPointer(op.path);
+                        let currentVal = _.get(state.static, pathKeys);
+                        
+                        switch(op.op) {
+                            case 'add': case 'replace':
+                                _.set(state.static, pathKeys, op.value); break;
+                            case 'remove': 
+                                _.unset(state.static, pathKeys); break;
+                            case 'inc': 
+                                _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) + (Number(op.value) || 0)); break;
+                            case 'mul': 
+                                _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) * (Number(op.value) || 1)); break;
+                            case 'min': 
+                                if (typeof currentVal !== 'number' || op.value < currentVal) _.set(state.static, pathKeys, op.value); break;
+                            case 'max': 
+                                if (typeof currentVal !== 'number' || op.value > currentVal) _.set(state.static, pathKeys, op.value); break;
+                            case 'push':
+                                if (!Array.isArray(currentVal)) { currentVal =[]; _.set(state.static, pathKeys, currentVal); }
+                                if (op.value && typeof op.value === 'object' && op.value.$each && Array.isArray(op.value.$each)) {
+                                    currentVal.push(...op.value.$each);
+                                } else { currentVal.push(op.value); }
+                                break;
+                            case 'addToSet':
+                                if (!Array.isArray(currentVal)) { currentVal =[]; _.set(state.static, pathKeys, currentVal); }
+                                const itemsToAdd = (op.value && typeof op.value === 'object' && op.value.$each && Array.isArray(op.value.$each)) ? op.value.$each : [op.value];
+                                itemsToAdd.forEach(item => {
+                                    if (!currentVal.some(existing => _.isEqual(existing, item))) currentVal.push(item);
+                                });
+                                break;
+                            case 'pop':
+                                if (Array.isArray(currentVal) && currentVal.length > 0) {
+                                    if (op.value === 1) currentVal.pop();
+                                    else if (op.value === -1) currentVal.shift();
                                 }
+                                break;
+                            case 'pull':
+                                if (Array.isArray(currentVal)) {
+                                    _.remove(currentVal, item => {
+                                        if (typeof op.value === 'object' && op.value !== null) return _.isMatch(item, op.value) || _.isEqual(item, op.value);
+                                        return item === op.value;
+                                    });
+                                }
+                                break;
+                            case 'move':
+                                if (currentVal !== undefined && typeof op.to === 'string') {
+                                    const targetKeys = parseJsonPointer(op.to);
+                                    _.set(state.static, targetKeys, currentVal);
+                                    _.unset(state.static, pathKeys);
+                                }
+                                break;
+                        }
+                    }
+                } else if (op.op === 'time') {
+                    if (typeof op.value === 'string') {
+                        if (state.time) {
+                            const d = new Date(op.value) - new Date(state.time);
+                            state.dtime = isNaN(d) ? 0 : d;
+                        } else {
+                            state.dtime = 0;
+                        }
+                        state.time = op.value;
+                    }
+                } else if (op.op === 'func') {
+                    if (typeof op.func_name === 'string') {
+                        const params = Array.isArray(op.params) ? op.params :[];
+                        const preState = isLiveGeneration ? goodCopy(state.static) : null;
+                        
+                        await runSandboxedFunction(op.func_name, params, state);
+                        
+                    if (isLiveGeneration && preState) {
+                            const diffs = generateJSONPatch(preState, state.static);
+                            if (diffs && diffs.length > 0) {
+                                generatedDiffs.push(...diffs);
                             }
                         }
-                        break;
-                    default:
-                        logger.warn(`Unknown operation type: ${op.op}`);
-                        break;
+                    }
                 }
             } catch(e) {
                 logger.error(`Failed to apply operation:`, op, e);
-                logger.shoutError(`Failed to apply operation: ${e.message}`);
             }
         }
         return { state, generatedDiffs };
@@ -460,9 +584,6 @@ $((() => {
     async function extractOperationsFromText(messageContent) {
         const operations =[];
         let match;
-        if (typeof y.jsonrepair !== 'function') {
-            await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-        }
         UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0;
         while ((match = UPDATE_BLOCK_EXTRACT_REGEX.exec(messageContent)) !== null) {
             let content = match[1].trim();
@@ -471,16 +592,57 @@ $((() => {
                 content = `[${content}]`;
             }
             try {
-                const repairedJson = y.jsonrepair(content);
-                const parsedData = JSON.parse(repairedJson);
+                if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                
+                let textToParse = content;
+                if (typeof window.jsonrepair === 'function') {
+                    try { textToParse = window.jsonrepair(content); } catch (e) {}
+                }
+                
+                const parsedData = JSON.parse(textToParse);
                 if (Array.isArray(parsedData)) operations.push(...parsedData);
                 else if (typeof parsedData === 'object' && parsedData !== null) operations.push(parsedData);
             } catch (e) {
-                logger.shoutError(`Failed to parse <UpdateVariable> block content: ${e.message}`);
-                logger.error("Failed to parse <UpdateVariable> block content:", e, "\nContent:", match[1]);
+                // Graceful failure: If a single block is malformed, log it and show a warning, but continue processing the rest of the message.
+                logger.error("Skipping malformed <UpdateVariable> block due to parsing error:", e, "\nContent:", match[1]);
+                if (typeof toastr !== 'undefined') {
+                    toastr.warning("SAM: Skipped a malformed data block.", "Parsing Warning");
+                }
             }
         }
         return operations;
+    }
+
+    // --- V5 History Crawler Restored ---
+    async function buildStateFromHistory(targetIndex) {
+        const chat = SillyTavern.getContext().chat;
+        let rebuiltState = goodCopy(INITIAL_STATE);
+        
+        // Preserve VectorDB, Summary, Checkpoint progress from current live state
+        if (samData) {
+            rebuiltState.jsondb = samData.jsondb;
+            rebuiltState.responseSummary = _.cloneDeep(samData.responseSummary);
+            rebuiltState.summary_progress = samData.summary_progress;
+        }
+
+        // Apply base data
+        const baseData = await getBaseDataFromWI();
+        if (baseData) {
+            rebuiltState.static = _.merge({}, rebuiltState.static, baseData);
+        }
+
+        const limit = Math.min(targetIndex, chat.length - 1);
+        for (let i = 0; i <= limit; i++) {
+            const msg = chat[i];
+            if (!msg || msg.is_user) continue;
+            
+            const ops = await extractOperationsFromText(msg.mes);
+            if (ops.length > 0) {
+                const { state } = await applyOperationsToState(ops, rebuiltState, false);
+                rebuiltState = state;
+            }
+        }
+        return rebuiltState;
     }
   
     // ========================================================================
@@ -531,7 +693,6 @@ $((() => {
             }
         } catch (e) {
             logger.error("L2 Summary failed", e);
-            logger.shoutError(`L2 Summary failed: ${e.message}`);
             if (typeof toastr !== 'undefined') toastr.error(`L2 摘要失败: ${e.message}`); return false; }
   
         if (!resultL2) return false;
@@ -587,12 +748,13 @@ $((() => {
         const opsFromMessage = await extractOperationsFromText(messageContent);
         const periodicOps = samFunctions.filter(f => f.periodic).map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
         
-        const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state);
+        // Pass `true` to indicate live generation, enabling Auto-Diff logging
+        const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state, true);
         samData = newState;
         
         // Append dynamically generated function diffs back into the variable update block to safely persist state.
         if (generatedDiffs && generatedDiffs.length > 0) {
-            const updatedOps = [...opsFromMessage, ...generatedDiffs];
+            const updatedOps =[...opsFromMessage, ...generatedDiffs];
             const newBlockContent = JSON.stringify(updatedOps, null, 2);
             
             UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0;
@@ -611,7 +773,6 @@ $((() => {
   
     async function applyDataToChat(data) {
         SillyTavern.getContext().variables.local.set("SAM_data", data);
-        // Note: <UpdateVariable> block stripping logic was removed to ensure patches persist in history permanently.
     }
   
     async function dispatcher(event) {
@@ -626,7 +787,7 @@ $((() => {
                 await processMessageState(chatLen - 1);
                 await triggerSummaryCheck(chatLen);
                 curr_state = STATES.IDLE; updateUIStatus();
-            } else if (event === tavern_events.MESSAGE_SWIPED || event === tavern_events.GENERATION_STOPPED) {
+            } else if (event === tavern_events.GENERATION_STOPPED) {
                 curr_state = STATES.IDLE; updateUIStatus();
             }
         } catch (e) { logger.error("Dispatcher Error:", e); curr_state = STATES.IDLE; updateUIStatus(); }
@@ -648,6 +809,15 @@ $((() => {
             k.statusText.textContent = `引擎状态: ${curr_state} | 数据: ${go_flag && samSettings.data_enable ? '活跃' : '休眠'}`;
             k.statusText.style.color =["PROCESSING", "SUMMARIZING"].includes(curr_state) ? "#f0ad4e" : "#5cb85c";
         }
+        if (k.depsText) {
+            const jr = typeof window.jsonrepair === 'function' ? 'green' : 'red';
+            const ms = typeof window.MiniSearch === 'function' ? 'green' : 'red';
+            
+        k.depsText.innerHTML = `
+                <div class="sam_dep_indicator" title="jsonrepair"><div class="sam_dep_dot ${jr}"></div></div>
+                <div class="sam_dep_indicator" title="MiniSearch"><div class="sam_dep_dot ${ms}"></div></div>
+            `;
+        }
     }
 
     // --- Start of UI Dragging & Positioning Logic (from reference) ---
@@ -662,8 +832,8 @@ $((() => {
         const width = UI_STATE.panelOpen ? (k.widget.offsetWidth || 800) : fabSize;
         const height = UI_STATE.panelOpen ? (k.widget.offsetHeight || 600) : fabSize;
         
-        const maxLeft = Math.max(8, y.innerWidth - width - 8);
-        const maxTop = Math.max(8, y.innerHeight - height - 8);
+        const maxLeft = Math.max(8, window.innerWidth - width - 8);
+        const maxTop = Math.max(8, window.innerHeight - height - 8);
         
         const safeLeft = Ce(leftTarget, 8, maxLeft, 8);
         const safeTop = Ce(topTarget, 8, maxTop, 8);
@@ -711,6 +881,11 @@ $((() => {
           .sam_content_area { flex: 1; overflow:hidden; display:flex; flex-direction: column; }
           .sam_content_area > * { flex: 1; overflow-y: auto; padding: 15px; box-sizing: border-box; }
           .sam_modal_footer { height: 40px; background: #252526; border-top: 1px solid #333; display: flex; justify-content: space-between; align-items: center; padding: 0 15px; flex-shrink:0;}
+          .sam_deps_bar { display: flex; gap: 8px; margin-left: 15px; border-left: 1px solid #444; padding-left: 15px; }
+          .sam_dep_indicator { display: inline-flex; align-items: center; }
+          .sam_dep_dot { width: 8px; height: 8px; border-radius: 50%; }
+          .sam_dep_dot.green { background: #5cb85c; box-shadow: 0 0 4px #5cb85c; }
+          .sam_dep_dot.red { background: #d9534f; box-shadow: 0 0 4px #d9534f; }
           .sam_status_bar { font-size: 11px; color: #666; } .sam_actions { display: flex; gap: 10px; }
           .sam_btn { padding: 6px 14px; border: none; font-size: 12px; cursor: pointer; border-radius: 2px; }
           .sam_btn_secondary { background: #3c3c3c; color: #ccc; } .sam_btn_secondary:hover { background: #4c4c4c; }
@@ -899,8 +1074,16 @@ $((() => {
                 const text = C.querySelector('#data_json_area')?.value;
                 if(text) {
                     let parsed; 
-                    try { parsed = JSON.parse(text); } 
-                    catch(e) { if(y.jsonrepair) parsed = JSON.parse(y.jsonrepair(text)); else throw e; }
+                    try { 
+                        parsed = JSON.parse(text); 
+                    } catch(e) { 
+                        if (typeof window.jsonrepair !== 'function') await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                        if (typeof window.jsonrepair === 'function') {
+                            parsed = JSON.parse(window.jsonrepair(text));
+                        } else {
+                            throw new Error("JSON invalid & jsonrepair fallback not available.");
+                        }
+                    }
                     samData = parsed;
                 }
                 
@@ -1084,7 +1267,10 @@ $((() => {
                 </div>
                 <div class="sam_content_area" id="sam_tab_content"></div>
                 <div class="sam_modal_footer">
-                    <div class="sam_status_bar" id="sam_status_display">初始化中...</div>
+                    <div style="display: flex; align-items: center;">
+                        <div class="sam_status_bar" id="sam_status_display">初始化中...</div>
+                        <div class="sam_deps_bar" id="sam_deps_display"></div>
+                    </div>
                     <div class="sam_actions"><button class="sam_btn sam_btn_secondary" id="sam_btn_refresh">重载数据</button></div>
                 </div>
               </div>
@@ -1097,16 +1283,17 @@ $((() => {
             k.header = c.querySelector(".sam_modal_header");
             k.contentArea = c.querySelector("#sam_tab_content"); 
             k.statusText = c.querySelector("#sam_status_display");
+            k.depsText = c.querySelector("#sam_deps_display");
             
             if (!k.widget || !k.panel || !k.fab || !k.header) throw new Error("Missing Elements");
             
             // --- Event Binding ---
-            O(k.fab, "click", () => { if ("1" !== k.widget.dataset.dragging) togglePanel(!UI_STATE.panelOpen); });
-            O(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
-            O(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(); renderTabContent(); toastr.info("数据已重载"); });
+            safeAddEventListener(k.fab, "click", () => { if ("1" !== k.widget.dataset.dragging) togglePanel(!UI_STATE.panelOpen); });
+            safeAddEventListener(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
+            safeAddEventListener(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(true); renderTabContent(); toastr.info("数据已重载"); });
             
             c.querySelectorAll('.sam_tab').forEach(tab => {
-                O(tab, "click", (e) => {
+                safeAddEventListener(tab, "click", (e) => {
                     c.querySelectorAll('.sam_tab').forEach(t=>t.classList.remove('active'));
                     tab.classList.add('active');
                     UI_STATE.activeTab = tab.dataset.tab;
@@ -1158,24 +1345,24 @@ $((() => {
                 }
             }
 
-            O(k.fab, "pointerdown", onPointerDown);
-            O(k.header, "pointerdown", onPointerDown);
-            O(v, "pointermove", onPointerMove);
-            O(v, "pointerup", onPointerUp);
-            O(v, "pointercancel", onPointerUp);
+            safeAddEventListener(k.fab, "pointerdown", onPointerDown);
+            safeAddEventListener(k.header, "pointerdown", onPointerDown);
+            safeAddEventListener(v, "pointermove", onPointerMove);
+            safeAddEventListener(v, "pointerup", onPointerUp);
+            safeAddEventListener(v, "pointercancel", onPointerUp);
             
             // --- Initialization ---
             togglePanel(UI_STATE.panelOpen, true);
             if (UI_STATE.uiLeft === null || UI_STATE.uiTop === null) {
                 const fabSize = UI_STATE.fabSizePx;
                 const padding = 16;
-                const defaultLeft = y.innerWidth - fabSize - padding;
-                const defaultTop = Math.max(padding, Math.min(y.innerHeight - fabSize - padding, 120));
+                const defaultLeft = window.innerWidth - fabSize - padding;
+                const defaultTop = Math.max(padding, Math.min(window.innerHeight - fabSize - padding, 120));
                 Tn(defaultLeft, defaultTop, true);
             } else {
                 Tn(UI_STATE.uiLeft, UI_STATE.uiTop, true);
             }
-            O(y, "resize", () => { An(); En(); });
+            safeAddEventListener(window, "resize", () => { An(); En(); });
 
             return true;
         } catch (e) {
@@ -1191,7 +1378,6 @@ $((() => {
         k.panel.hidden = !open;
         if (open) {
             renderTabContent();
-            // Issue 1 Safety check: if panel was meant to render but fails dimension checks (e.g., CSS/DOM breakage), commit suicide.
             setTimeout(() => {
                 if (k.panel && k.panel.offsetWidth === 0 && !k.panel.hidden) {
                     logger.error("Panel layout broken / failed to display dimensions. Committing suicide.");
@@ -1205,17 +1391,15 @@ $((() => {
     // ========================================================================
     // 9. 初始化与上下文加载
     // ========================================================================
-    async function loadContextData() {
+    async function loadContextData(forceRebuild = false) {
         await checkWorldInfoActivation();
         
-        // Issue 1: Robust Suicide Logic - If SAM flag falls (missing identifier), completely destroy icon
         if (!go_flag) {
             logger.info("SAM identifier not found. Icon committing suicide.");
             cleanupDOM();
-            return; // Terminate further initialization for the dormant chat state
+            return;
         }
         
-        // Automatically resurrect the icon component if conditions validate after a switch
         if (!k.widget) {
             logger.info("SAM identifier found. Resurrecting icon.");
             Nn();
@@ -1227,9 +1411,28 @@ $((() => {
 
         loadSamSettings();
         samFunctions = await getFunctionsFromWI();
-        let d = SillyTavern.getContext().variables.local.get("SAM_data");
-        if (d && typeof d === 'object') { _.defaultsDeep(d, INITIAL_STATE); samData = d; } 
-        else { samData = goodCopy(INITIAL_STATE); SillyTavern.getContext().variables.local.set("SAM_data", samData); }
+        
+        if (forceRebuild) {
+            // Rebuild from message 0 up to current to prevent state desync
+            const chatLen = SillyTavern.getContext().chat.length;
+            let targetIndex = chatLen - 1;
+            while (targetIndex >= 0 && SillyTavern.getContext().chat[targetIndex].is_user) {
+                targetIndex--;
+            }
+            if (targetIndex < 0) targetIndex = 0;
+            samData = await buildStateFromHistory(targetIndex);
+            SillyTavern.getContext().variables.local.set("SAM_data", samData);
+        } else {
+            let d = SillyTavern.getContext().variables.local.get("SAM_data");
+            if (d && typeof d === 'object') { 
+                _.defaultsDeep(d, INITIAL_STATE); 
+                samData = d; 
+            } else { 
+                samData = await buildStateFromHistory(SillyTavern.getContext().chat.length - 1); 
+                SillyTavern.getContext().variables.local.set("SAM_data", samData); 
+            }
+        }
+        
         await initializeDatabase(samData.jsondb);
         updateUIStatus();
     }
@@ -1237,6 +1440,10 @@ $((() => {
     async function initSAM() {
         if (typeof tavern_events === 'undefined') { logger.warn("Not in ST environment."); return; }
         
+        // Pre-fetch dependencies to initialize indicators rapidly
+        loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+        loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
+
         loadSamSettings();
         apiManager = new APIManager({ initialPresets: samSettings.api_presets, onUpdate: (p) => { samSettings.api_presets = p; saveSamSettings(); } });
         
@@ -1244,10 +1451,14 @@ $((() => {
         bindTavernEvent(tavern_events.GENERATION_STARTED, (type, dry) => { if (dry) current_run_is_dry = true; else pushEvent(tavern_events.GENERATION_STARTED); });
         bindTavernEvent(tavern_events.GENERATION_ENDED, () => pushEvent(tavern_events.GENERATION_ENDED));
         bindTavernEvent(tavern_events.GENERATION_STOPPED, () => pushEvent(tavern_events.GENERATION_STOPPED));
-        bindTavernEvent(tavern_events.MESSAGE_SWIPED, async () => { await loadContextData(); pushEvent(tavern_events.MESSAGE_SWIPED); });
-        bindTavernEvent(tavern_events.CHAT_CHANGED, async () => { await loadContextData(); });
+        
+        // Pass `true` to force crawler execution for state safety on destructive actions
+        bindTavernEvent(tavern_events.MESSAGE_SWIPED, async () => { await loadContextData(true); });
+        bindTavernEvent(tavern_events.MESSAGE_DELETED, async () => { await loadContextData(true); });
+        bindTavernEvent(tavern_events.MESSAGE_EDITED, async () => { await loadContextData(true); });
+        bindTavernEvent(tavern_events.CHAT_CHANGED, async () => { await loadContextData(true); });
   
-        await loadContextData();
+        await loadContextData(true); // Always force rebuild on initial load to guarantee sync
         
         logger.info(`SAM Core Engine V${SCRIPT_VERSION} fully loaded.`);
     }
@@ -1256,7 +1467,7 @@ $((() => {
         initSAM();
     };
     
-    if (v.readyState === "loading") { O(v, "DOMContentLoaded", startup, { once: true }); } 
+    if (v.readyState === "loading") { safeAddEventListener(v, "DOMContentLoaded", startup, { once: true }); } 
     else { startup(); }
   
   })());
