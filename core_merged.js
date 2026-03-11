@@ -154,7 +154,12 @@ $((() => {
   
     window[INSTANCE_KEY] = {
         stop: function () {
-            for (; cleanup_pool.length;) { const cb = cleanup_pool.pop(); try { cb(); } catch(e){} }
+            for (; cleanup_pool.length;) { 
+                const cb = cleanup_pool.pop();
+                try { 
+                    cb();
+                } catch(e){}
+            }
             cleanupDOM();
         }
     };
@@ -434,7 +439,7 @@ $((() => {
                 wi.entries[entryKey].content = content;
                 await TavernHelper.updateWorldInfo(characterWIName, wi);
             } else {
-                 toastr.warning("未找到SAM函数库条目，请先在世界信息中手动创建一个comment为'__SAM_IDENTIFIER__'的条目。");
+                toastr.warning("未找到SAM函数库条目，请先在世界信息中手动创建一个comment为'__SAM_IDENTIFIER__'的条目。");
             }
             toastr.success("函数已成功保存至世界信息。");
         } catch (e) { console.error(e); toastr.error("保存函数至世界信息失败。"); }
@@ -443,7 +448,11 @@ $((() => {
     async function initializeDatabase(dbStateJson = null) {
         if (!sam_db) sam_db = new SAMDatabase({ enabled: true });
         await sam_db.init();
-        if (dbStateJson) { try { sam_db.import(dbStateJson); } catch(e){} }
+        if (dbStateJson) { 
+            try { 
+                sam_db.import(dbStateJson); 
+            } catch(e){}
+        }
     }
   
     async function runSandboxedFunction(funcName, params, state) {
@@ -907,7 +916,10 @@ $((() => {
         isDispatching = false;
         if (event_queue.length > 0) setTimeout(() => unified_dispatch_executor(), 10);
     }
-    const pushEvent = (ev) => { event_queue.push(ev); unified_dispatch_executor(); };
+    const pushEvent = (ev) => { 
+        event_queue.push(ev);
+        unified_dispatch_executor();
+    };
   
     // ========================================================================
     // 8. 内部悬浮窗 UI & 样式构建
