@@ -118,7 +118,7 @@ $((() => {
     // ========================================================================
     // 3. 统一全局状态
     // ========================================================================
-    const P =[]; // 事件清理池
+    const cleanup_pool =[]; // 事件清理池
     const _loadingLibraries = {};
     const logger = {
         info: (...args) => console.log(`[${APP_NAME}]`, ...args),
@@ -154,7 +154,7 @@ $((() => {
   
     window[INSTANCE_KEY] = {
         stop: function () {
-            for (; P.length;) { const cb = P.pop(); try { cb(); } catch(e){} }
+            for (; cleanup_pool.length;) { const cb = cleanup_pool.pop(); try { cb(); } catch(e){} }
             cleanupDOM();
         }
     };
@@ -313,13 +313,13 @@ $((() => {
     function O(elem, type, listener, options) {
         if (elem && "function" == typeof elem.addEventListener && "function" == typeof elem.removeEventListener) {
             elem.addEventListener(type, listener, options);
-            P.push(() => elem.removeEventListener(type, listener, options));
+            cleanup_pool.push(() => elem.removeEventListener(type, listener, options));
         }
     }
     
     function bindTavernEvent(eventName, handler) {
         if (typeof eventOn === 'function') eventOn(eventName, handler);
-        P.push(() => { if (typeof eventRemoveListener === 'function') eventRemoveListener(eventName, handler); });
+        cleanup_pool.push(() => { if (typeof eventRemoveListener === 'function') eventRemoveListener(eventName, handler); });
     }
   
     // Sandboxed External Library Loader (Removes dependency on global window object)
@@ -1414,7 +1414,7 @@ $((() => {
                 k.widget.setAttribute('data-beat', beatCount.toString());
             }
         }, 2000);
-        P.push(() => clearInterval(hb)); // 注册到清理池，正常退出时自动终止心跳
+        cleanup_pool.push(() => clearInterval(hb)); // 注册到清理池，正常退出时自动终止心跳
     }
 
     function buildWidgetHTML() {
