@@ -1,27 +1,21 @@
-// ==UserScript==
-// @name         SAM Core Engine - Fully Integrated (Refactored)
-// @version      6.2.11
-// @description  SAM engine refactored to use RFC 6902 (JSON Patch) for all state operations, enhancing robustness and structure.
-// @author       SAM Extension Team
-// @match        *://*/*
-// @grant        none
-// ==/UserScript==
-
 $((() => {
     "use strict";
-  
+
     // ========================================================================
-    // 1. 基础配置与标识常量
+    // 1. 基础配置与标识常量 (Base Configuration & Constants)
     // ========================================================================
     const INSTANCE_KEY = "__sam_core_widget_v6__";
     const STYLE_ID = "sam-core-widget-style";
     const WIDGET_ID = "sam-core-widget-root";
     const APP_NAME = "SAM 核心管理器";
-    
-    const SCRIPT_VERSION = "6.2.11 'Lone star'";
+
+    const SCRIPT_VERSION = "6.2.11 'Lone star'"; 
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     const MINISEARCH_URL = "https://cdn.jsdelivr.net/npm/minisearch@6.3.0/dist/umd/index.min.js";
-    
+
+    //[RESTORED FROM V5] Key for cleaning up old instances on script reload
+    const HANDLER_STORAGE_KEY = `__SAM_V6_EVENT_HANDLER_STORAGE__`;
+
     // Local module references to replace global window dependencies
     let local_jsonrepair = null;
     let local_MiniSearch = null;
@@ -29,14 +23,14 @@ $((() => {
     // Regex to find and extract content from <JSONPatch> blocks.
     const UPDATE_BLOCK_EXTRACT_REGEX = /<JSONPatch>([\s\S]*?)<\/JSONPatch>/gim;
     const UPDATE_BLOCK_REMOVE_REGEX = /<JSONPatch>[\s\S]*?<\/JSONPatch>/gim;
-    
+
     // Legacy & New Checkpoint Block Regexes (Restored Functionality)
     const OLD_START_MARKER = '$$$$$$data_block$$$$$$';
     const OLD_END_MARKER = '$$$$$$data_block_end$$$$$$';
     const OLD_STATE_PARSE_REGEX = new RegExp(`${OLD_START_MARKER.replace(/\$/g, '\\$')}\\s*([\\s\\S]*?)\\s*${OLD_END_MARKER.replace(/\$/g, '\\$')}`, 's');
     const OLD_STATE_REMOVE_REGEX = new RegExp(`${OLD_START_MARKER.replace(/\$/g, '\\$')}[\\s\\S]*?${OLD_END_MARKER.replace(/\$/g, '\\$')}`, 'sg');
-    
-    const CHECKPOINT_MARKER = '<!-- SAM_CHECKPOINT -->';
+
+    // Kept solely for backwards compatibility with any existing V6 blocks in chat history
     const CHECKPOINT_REGEX = /<SAMCheckpoint>([\s\S]*?)<\/SAMCheckpoint>/s;
     const CHECKPOINT_STRIP_REGEX = /(?:<!-- SAM_CHECKPOINT -->\s*)?<SAMCheckpoint>[\s\S]*?<\/SAMCheckpoint>/sg;
 
@@ -44,19 +38,24 @@ $((() => {
     const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     const DELAY_MS = isMobileDevice ? 10 : 5;
 
-    const INITIAL_STATE = { 
-        static: {}, time: "", dtime: 0, volatile:[], 
-        responseSummary: { L1:[], L2:[], L3:[] }, 
+    const INITIAL_STATE = {
+        static: {}, time: "", dtime: 0, volatile:[],
+        responseSummary: { L1:[], L2:[], L3:[] },
         summary_progress: 0,
         jsondb: null,
-        func: [], events:[], event_counter: 0 
+        func: [], events:[], event_counter: 0
     };
-    
+
+    // [RESTORED FROM V5] FSM States
     const STATES = { IDLE: "IDLE", AWAIT_GENERATION: "AWAIT_GENERATION", PROCESSING: "PROCESSING", SUMMARIZING: "SUMMARIZING" };
     const SAM_FUNCTIONLIB_ID = "__SAM_IDENTIFIER__";
     const SAM_BASEDATA_ID = "__SAM_base_data__";
     const MODULE_NAME = 'sam_extension';
-  
+
+    //[RESTORED FROM V5] Constant for the generation watcher
+    const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
+    const WATCHER_INTERVAL_MS = 3000;
+
     // API Sources Constants
     const API_SOURCES = {
         OPENAI: 'openai', CLAUDE: 'claude', OPENROUTER: 'openrouter', AI21: 'ai21', MAKERSUITE: 'makersuite',
@@ -73,7 +72,7 @@ $((() => {
         { value: 'xai', label: 'xAI (Grok)' }, { value: 'pollinations', label: 'Pollinations' },
         { value: 'vertexai', label: 'Google Vertex AI' }, { value: 'ai21', label: 'AI21' },
     ];
-  
+
     // Default Settings
     const DEFAULT_SETTINGS = {
         data_enable: true,
@@ -91,21 +90,37 @@ $((() => {
         summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用我们扩展的 JSON Patch 格式，并包裹在 <JSONPatch> 标签内。支持的op包含: replace, remove, delta, insert, inc, mul, push, addToSet, pull, pop, min, max, move。例如:\n<JSONPatch>\n[\n  { "op": "delta", "path": "/gold", "value": 10 }\n]\n</JSONPatch>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <JSONPatch> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
         summary_prompt_L3: `You are a summarization expert. Review the following list of sequential event summaries (L2 summaries). Your task is to condense them into a single, high-level narrative paragraph (an L3 summary). Focus on the most significant developments.\n\n---\n**Summaries to Condense:**\n{{summary_content}}\n---`
     };
-  
+
     // ========================================================================
     // 2. 环境解析与全局实例清理
     // ========================================================================
     const y = (function () { try { if (window.top && window.top.document) return window.top; } catch (err) {} return window; })();
     const v = (function (contextWindow) { try { if (contextWindow && contextWindow.document) return contextWindow.document; } catch (err) {} return document; })(y);
-    
+
     // UI 内部状态引用声明
     const k = { widget: null, panel: null, fab: null, header: null, contentArea: null, statusText: null, depsText: null };
+
+    // [RESTORED FROM V5] Cleanup function for hot-reloading context
+    const cleanupPreviousInstance = () => {
+        const oldHandlers = window[HANDLER_STORAGE_KEY];
+        if (!oldHandlers) { return; }
+        eventRemoveListener(tavern_events.GENERATION_STARTED, oldHandlers.handleGenerationStarted);
+        eventRemoveListener(tavern_events.GENERATION_ENDED, oldHandlers.handleGenerationEnded);
+        eventRemoveListener(tavern_events.MESSAGE_SWIPED, oldHandlers.handleMessageSwiped);
+        eventRemoveListener(tavern_events.MESSAGE_DELETED, oldHandlers.handleMessageDeleted);
+        eventRemoveListener(tavern_events.MESSAGE_EDITED, oldHandlers.handleMessageEdited);
+        eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
+        eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
+        eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
+        delete window[HANDLER_STORAGE_KEY];
+        console.log(`[${APP_NAME}] Cleaned up previous instance event listeners.`);
+    };
 
     function cleanupDOM() {
         try {
             const w = v.getElementById(WIDGET_ID); if (w) w.remove();
             const s = v.getElementById(STYLE_ID); if (s) s.remove();
-            const wd = v.getElementById("sam-watchdog-script"); if (wd) wd.remove(); // 新增：清理看门狗
+            const wd = v.getElementById("sam-watchdog-script"); if (wd) wd.remove();
             k.widget = null; k.panel = null; k.fab = null; k.header = null; k.contentArea = null; k.statusText = null; k.depsText = null;
         } catch(e) {}
     }
@@ -114,7 +129,7 @@ $((() => {
       try { window[INSTANCE_KEY].stop(); } catch (err) {}
     }
     cleanupDOM();
-  
+
     // ========================================================================
     // 3. 统一全局状态
     // ========================================================================
@@ -127,23 +142,26 @@ $((() => {
         shoutInfo: (...args) => toastr.info(`[${APP_NAME}]`, ...args),
         shoutError: (...args) => toastr.error(`[${APP_NAME}]`, ...args)
     };
-  
+
+    // [RESTORED FROM V5] State variables including explicit lock and explicit cache
     let curr_state = STATES.IDLE;
-    let event_queue =[];
+    const event_queue =[];
     let isDispatching = false;
-    let generationWatcherId = null;
-    let go_flag = false;
-    let current_run_is_dry = false;
+    let isProcessingState = false; 
     let isCheckpointing = false;
-  
+    let prevState = null; 
+    let generationWatcherId = null; 
+    let current_run_is_dry = false;
+    let go_flag = false;
+
     // --- 数据与UI状态 ---
     let samSettings = structuredClone(DEFAULT_SETTINGS);
     let samData = goodCopy(INITIAL_STATE);
     let samFunctions =[];
-    
+
     let sam_db = null;
     let apiManager = null;
-  
+
     let UI_STATE = {
         panelOpen: false, uiLeft: null, uiTop: null, fabSizePx: 48,
         activeTab: 'SUMMARY',
@@ -151,14 +169,12 @@ $((() => {
         selectedPresetIndex: -1,
         selectedRegexIndex: -1
     };
-  
+
     window[INSTANCE_KEY] = {
         stop: function () {
-            for (; cleanup_pool.length;) { 
+            for (; cleanup_pool.length;) {
                 const cb = cleanup_pool.pop();
-                try { 
-                    cb();
-                } catch(e){}
+                try { cb(); } catch(e){}
             }
             cleanupDOM();
         }
@@ -169,9 +185,9 @@ $((() => {
             setTimeout(() => { resolve(JSON.stringify(obj, null, 2)); }, DELAY_MS);
         });
     }
-  
+
     // ========================================================================
-    // 4. SAMDatabase 类封装
+    // 4. SAMDatabase 类封装 (No changes needed)
     // ========================================================================
     class SAMDatabase {
         constructor({ enabled = true } = {}) {
@@ -232,9 +248,9 @@ $((() => {
             } catch (error) { logger.warn("DB import failed.", error); return false; }
         }
     }
-  
+
     // ========================================================================
-    // 5. APIManager 类封装
+    // 5. APIManager 类封装 (No changes needed)
     // ========================================================================
     class APIManager {
         constructor({ initialPresets =[], onUpdate = () => {} }) {
@@ -277,20 +293,20 @@ $((() => {
             const preset = this.getPreset(presetName);
             if (!preset) throw new Error(`APIManager: Preset "${presetName}" not found.`);
             const orderedMessages = messages.map(m => ({ role: this._normalizeRole(m.role), content: m.content }));
-  
+
             if (preset.apiMode === 'tavern') {
                 if (typeof TavernHelper === 'undefined' || typeof TavernHelper.generateRaw !== 'function') throw new Error('APIManager: TavernHelper.generateRaw not available.');
                 const response = await TavernHelper.generateRaw({ ordered_prompts: orderedMessages, should_stream: false }, abortSignal);
                 if (typeof response === 'string') return response.trim();
                 throw new Error(`Main API did not return a valid text response.`);
             }
-  
+
             if (preset.apiMode === 'custom') {
                 const apiConfig = preset.apiConfig || {};
                 if (!apiConfig.model) throw new Error(`APIManager: Model name is required for custom preset.`);
                 const cleanUrl = apiConfig.url ? apiConfig.url.replace(/\/$/, '') : '';
                 const source = apiConfig.source || API_SOURCES.CUSTOM;
-                
+
                 let requestBody = {
                     messages: orderedMessages, model: apiConfig.model, max_tokens: apiConfig.max_tokens,
                     temperature: apiConfig.temperature, top_p: apiConfig.top_p, stream: false, chat_completion_source: source,
@@ -311,52 +327,89 @@ $((() => {
             throw new Error(`APIManager: Unknown apiMode`);
         }
     }
-  
+
     // ========================================================================
-    // 6. 基础工具与状态操作函数 (Refactored Core)
+    // 6. 基础工具与状态操作函数
     // ========================================================================
+
+    // [RESTORED FROM V5] Generation Watcher functions
+    function stopGenerationWatcher() {
+        if (generationWatcherId) {
+            clearInterval(generationWatcherId);
+            generationWatcherId = null;
+        }
+    }
+
+    function startGenerationWatcher() {
+        stopGenerationWatcher(); 
+        generationWatcherId = setInterval(() => {
+            const isUiGenerating = $('#mes_stop').is(':visible');
+            if (curr_state === STATES.AWAIT_GENERATION && !isUiGenerating) {
+                logger.warn("Generation Watchdog: UI generation stopped, but no 'ended' event received. Forcing completion.");
+                stopGenerationWatcher();
+                unifiedEventHandler(FORCE_PROCESS_COMPLETION);
+            } else if (curr_state !== STATES.AWAIT_GENERATION) {
+                stopGenerationWatcher();
+            }
+        }, WATCHER_INTERVAL_MS);
+    }
+
+    function findLatestUserMsgIndex() {
+        const chat = SillyTavern.getContext().chat;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i] && chat[i].is_user) { return i; }
+        }
+        return -1; 
+    }
+
+    function findLastAiMessageAndIndex() {
+        const chat = SillyTavern.getContext().chat;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i] && !chat[i].is_user) { return i; }
+        }
+        return -1; 
+    }
+
     function add_event_listener(elem, type, listener, options) {
         if (elem && "function" == typeof elem.addEventListener && "function" == typeof elem.removeEventListener) {
             elem.addEventListener(type, listener, options);
             cleanup_pool.push(() => elem.removeEventListener(type, listener, options));
         }
     }
-    
+
     function bindTavernEvent(eventName, handler) {
         eventOn(eventName, handler);
         cleanup_pool.push(() => {eventRemoveListener(eventName, handler); });
     }
-  
-    // Sandboxed External Library Loader (Removes dependency on global window object)
+
     async function loadExternalLibrary(url, libName) {
         if (libName === 'jsonrepair' && local_jsonrepair) return true;
         if (libName === 'MiniSearch' && local_MiniSearch) return true;
-        
+
         if (_loadingLibraries[url]) return await _loadingLibraries[url];
-        
+
         logger.info(`Downloading external library: ${libName}...`);
-        
+
         _loadingLibraries[url] = (async () => {
             try {
                 const response = await fetch(url);
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
                 const code = await response.text();
-                
+
                 const mockModule = { exports: {} };
-                // Execute code by injecting mock module & exports variables to intercept UMD/CommonJS
                 const fn = new Function('module', 'exports', code);
                 fn(mockModule, mockModule.exports);
-                
+
                 let exported = mockModule.exports;
                 if (exported && typeof exported !== 'function') {
                     if (exported[libName]) exported = exported[libName];
                     else if (exported.default) exported = exported.default;
                 }
-                
+
                 if (libName === 'jsonrepair') local_jsonrepair = exported;
                 if (libName === 'MiniSearch') local_MiniSearch = exported;
-                
-                logger.info(`Library ${libName} loaded successfully.`); 
+
+                logger.info(`Library ${libName} loaded successfully.`);
                 updateUIStatus();
                 return true;
             } catch (error) {
@@ -367,12 +420,12 @@ $((() => {
                 delete _loadingLibraries[url];
             }
         })();
-        
+
         return await _loadingLibraries[url];
     }
-  
+
     function goodCopy(state) { return _.cloneDeep(state || INITIAL_STATE); }
-  
+
     function loadSamSettings() {
         const { extensionSettings } = SillyTavern.getContext();
         if (!extensionSettings[MODULE_NAME]) extensionSettings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
@@ -380,14 +433,14 @@ $((() => {
         samSettings = extensionSettings[MODULE_NAME];
         return samSettings;
     }
-    
+
     function saveSamSettings() {
         const { extensionSettings, saveSettingsDebounced } = SillyTavern.getContext();
         extensionSettings[MODULE_NAME] = samSettings;
         saveSettingsDebounced();
         if (UI_STATE.panelOpen) renderTabContent();
     }
-  
+
     async function checkWorldInfoActivation() {
         try {
             const characterId = SillyTavern.getContext().characterId;
@@ -400,7 +453,7 @@ $((() => {
             go_flag = Object.values(wi.entries).some(item => item.comment === SAM_FUNCTIONLIB_ID);
         } catch (e) { go_flag = false; }
     }
-  
+
     async function getFunctionsFromWI() {
         try {
             const characterId = SillyTavern.getContext().characterId;
@@ -412,7 +465,7 @@ $((() => {
             return funcEntry && funcEntry.content ? JSON.parse(funcEntry.content) :[];
         } catch (e) { return[]; }
     }
-    
+
     async function getBaseDataFromWI() {
         try {
             const characterId = SillyTavern.getContext().characterId;
@@ -424,12 +477,12 @@ $((() => {
             return baseDataEntry && baseDataEntry.content ? JSON.parse(baseDataEntry.content) : null;
         } catch (e) { return null; }
     }
-    
+
     async function saveFunctionsToWI(functions) {
         if (!go_flag) { toastr.error("无法保存: 世界信息中未找到SAM标识符。"); return; }
         const characterWIName = await TavernHelper.getCurrentCharPrimaryLorebook();
         if (!characterWIName) { toastr.error("此角色没有关联的世界信息文件。"); return; }
-        
+
         try {
             let wi = await SillyTavern.getContext().loadWorldInfo(characterWIName);
             const entryKey = _.findKey(wi.entries, (entry) => entry.comment === SAM_FUNCTIONLIB_ID);
@@ -448,34 +501,32 @@ $((() => {
     async function initializeDatabase(dbStateJson = null) {
         if (!sam_db) sam_db = new SAMDatabase({ enabled: true });
         await sam_db.init();
-        if (dbStateJson) { 
-            try { 
-                sam_db.import(dbStateJson); 
-            } catch(e){}
+        if (dbStateJson) {
+            try { sam_db.import(dbStateJson); } catch(e){}
         }
     }
-  
+
     async function runSandboxedFunction(funcName, params, state) {
         const funcDef = samFunctions.find(f => f.func_name === funcName);
         if (!funcDef) return;
         const timeout = funcDef.timeout ?? 2000;
         const formalParamNames =[]; let restParamName = null;
-        for (const param of (funcDef.func_params ||[])) { 
-            if (param.startsWith('...')) restParamName = param.substring(3); 
-            else formalParamNames.push(param); 
+        for (const param of (funcDef.func_params ||[])) {
+            if (param.startsWith('...')) restParamName = param.substring(3);
+            else formalParamNames.push(param);
         }
         let bodyPrologue = restParamName ? `const ${restParamName} = Array.from(arguments).slice(${4 + formalParamNames.length});\n` : '';
         const fetchImpl = funcDef.network_access ? window.fetch.bind(window) : () => { throw new Error('Network disabled'); };
-        
+
         const execPromise = new Promise(async (resolve, reject) => {
             try {
                 const userFunc = new Function('state', '_', 'fetch', 'XMLHttpRequest', ...formalParamNames, `'use strict';\n${bodyPrologue}${funcDef.func_body}`);
                 resolve(await userFunc.apply(null,[state, _, fetchImpl, null, ...params]));
             } catch (err) { reject(err); }
         });
-        try { 
-            await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); } 
-        catch(e) { 
+        try {
+            await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); }
+        catch(e) {
             logger.error(`Function "${funcName}" execution failed:`, e);
         }
     }
@@ -488,61 +539,46 @@ $((() => {
         return pointer.substring(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'));
     }
 
-    // Hardcoded JSONPatch generator avoiding external library dependencies
     function generateJSONPatch(obj1, obj2) {
         const patches =[];
-        
+
         function escapePath(str) {
             return String(str).replace(/~/g, '~0').replace(/\//g, '~1');
         }
 
         function diff(a, b, path) {
             if (a === b) return;
-            
+
             if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
                 if (Array.isArray(a) && Array.isArray(b)) {
                     const minLen = Math.min(a.length, b.length);
-                    for (let i = 0; i < minLen; i++) {
-                        diff(a[i], b[i], `${path}/${i}`);
-                    }
+                    for (let i = 0; i < minLen; i++) { diff(a[i], b[i], `${path}/${i}`); }
                     if (b.length > a.length) {
-                        for (let i = a.length; i < b.length; i++) {
-                            patches.push({ op: 'insert', path: `${path}/${i}`, value: b[i] });
-                        }
+                        for (let i = a.length; i < b.length; i++) { patches.push({ op: 'insert', path: `${path}/${i}`, value: b[i] }); }
                     } else if (a.length > b.length) {
-                        for (let i = a.length - 1; i >= b.length; i--) {
-                            patches.push({ op: 'remove', path: `${path}/${i}` });
-                        }
+                        for (let i = a.length - 1; i >= b.length; i--) { patches.push({ op: 'remove', path: `${path}/${i}` }); }
                     }
                 } else if (!Array.isArray(a) && !Array.isArray(b)) {
                     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
                     for (const key of keys) {
                         const newPath = `${path}/${escapePath(key)}`;
-                        if (!b.hasOwnProperty(key)) {
-                            patches.push({ op: 'remove', path: newPath });
-                        } else if (!a.hasOwnProperty(key)) {
-                            patches.push({ op: 'insert', path: newPath, value: b[key] });
-                        } else {
-                            diff(a[key], b[key], newPath);
-                        }
+                        if (!b.hasOwnProperty(key)) { patches.push({ op: 'remove', path: newPath }); } 
+                        else if (!a.hasOwnProperty(key)) { patches.push({ op: 'insert', path: newPath, value: b[key] }); } 
+                        else { diff(a[key], b[key], newPath); }
                     }
-                } else {
-                    patches.push({ op: 'replace', path: path, value: b });
-                }
-            } else {
-                patches.push({ op: 'replace', path: path, value: b });
-            }
+                } else { patches.push({ op: 'replace', path: path, value: b }); }
+            } else { patches.push({ op: 'replace', path: path, value: b }); }
         }
-        
+
         diff(obj1, obj2, '');
         return patches;
     }
 
     async function applyOperationsToState(operations, state, isLiveGeneration = false) {
         if (!operations || operations.length === 0) return { state, generatedDiffs:[] };
-        
+
         let generatedDiffs =[];
-        
+
         for (const op of operations) {
             if (!op || !op.op) continue;
             try {
@@ -551,35 +587,26 @@ $((() => {
                     if (typeof pathStr === 'string') {
                         const pathKeys = parseJsonPointer(pathStr);
                         let currentVal = _.get(state.static, pathKeys);
-                        
+
                         switch(op.op) {
                             case 'insert':
                                 if (pathStr.endsWith('/-')) {
                                     const parentPath = pathStr === '/-' ? '/' : pathStr.slice(0, -2);
                                     const parentKeys = parseJsonPointer(parentPath);
                                     let parentVal = parentKeys.length ? _.get(state.static, parentKeys) : state.static;
-                                    if (!Array.isArray(parentVal)) { 
-                                        parentVal =[]; 
-                                        if(parentKeys.length) _.set(state.static, parentKeys, parentVal); 
+                                    if (!Array.isArray(parentVal)) {
+                                        parentVal =[];
+                                        if(parentKeys.length) _.set(state.static, parentKeys, parentVal);
                                     }
                                     parentVal.push(op.value);
-                                } else {
-                                    _.set(state.static, pathKeys, op.value);
-                                }
+                                } else { _.set(state.static, pathKeys, op.value); }
                                 break;
-                            case 'replace':
-                                _.set(state.static, pathKeys, op.value); break;
-                            case 'remove': 
-                                _.unset(state.static, pathKeys); break;
-                            case 'delta':
-                            case 'inc': 
-                                _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) + (Number(op.value) || 0)); break;
-                            case 'mul': 
-                                _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) * (Number(op.value) || 1)); break;
-                            case 'min': 
-                                if (typeof currentVal !== 'number' || op.value < currentVal) _.set(state.static, pathKeys, op.value); break;
-                            case 'max': 
-                                if (typeof currentVal !== 'number' || op.value > currentVal) _.set(state.static, pathKeys, op.value); break;
+                            case 'replace': _.set(state.static, pathKeys, op.value); break;
+                            case 'remove': _.unset(state.static, pathKeys); break;
+                            case 'delta': case 'inc': _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) + (Number(op.value) || 0)); break;
+                            case 'mul': _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) * (Number(op.value) || 1)); break;
+                            case 'min': if (typeof currentVal !== 'number' || op.value < currentVal) _.set(state.static, pathKeys, op.value); break;
+                            case 'max': if (typeof currentVal !== 'number' || op.value > currentVal) _.set(state.static, pathKeys, op.value); break;
                             case 'push':
                                 if (!Array.isArray(currentVal)) { currentVal =[]; _.set(state.static, pathKeys, currentVal); }
                                 if (op.value && typeof op.value === 'object' && op.value.$each && Array.isArray(op.value.$each)) {
@@ -589,9 +616,7 @@ $((() => {
                             case 'addToSet':
                                 if (!Array.isArray(currentVal)) { currentVal =[]; _.set(state.static, pathKeys, currentVal); }
                                 const itemsToAdd = (op.value && typeof op.value === 'object' && op.value.$each && Array.isArray(op.value.$each)) ? op.value.$each :[op.value];
-                                itemsToAdd.forEach(item => {
-                                    if (!currentVal.some(existing => _.isEqual(existing, item))) currentVal.push(item);
-                                });
+                                itemsToAdd.forEach(item => { if (!currentVal.some(existing => _.isEqual(existing, item))) currentVal.push(item); });
                                 break;
                             case 'pop':
                                 if (Array.isArray(currentVal) && currentVal.length > 0) {
@@ -621,33 +646,27 @@ $((() => {
                         if (state.time) {
                             var d = new Date(op.value) - new Date(state.time);
                             state.dtime = isNaN(d) ? 0 : d;
-                        } else {
-                            state.dtime = 0;
-                        }
+                        } else { state.dtime = 0; }
                         state.time = op.value;
                     }
                 } else if (op.op === 'func') {
                     if (typeof op.func_name === 'string') {
                         const params = Array.isArray(op.params) ? op.params :[];
                         const preState = isLiveGeneration ? goodCopy(state.static) : null;
-                        
+
                         await runSandboxedFunction(op.func_name, params, state);
-                        
+
                         if (isLiveGeneration && preState) {
                             const diffs = generateJSONPatch(preState, state.static);
-                            if (diffs && diffs.length > 0) {
-                                generatedDiffs.push(...diffs);
-                            }
+                            if (diffs && diffs.length > 0) { generatedDiffs.push(...diffs); }
                         }
                     }
                 }
-            } catch(e) {
-                logger.error(`Failed to apply operation:`, op, e);
-            }
+            } catch(e) { logger.error(`Failed to apply operation:`, op, e); }
         }
         return { state, generatedDiffs };
     }
-  
+
     async function extractOperationsFromText(messageContent) {
         const operations =[];
         let match;
@@ -655,17 +674,12 @@ $((() => {
         while ((match = UPDATE_BLOCK_EXTRACT_REGEX.exec(messageContent)) !== null) {
             let content = match[1].trim();
             if (!content) continue;
-            if (!content.startsWith('[') && !content.endsWith(']')) {
-                content = `[${content}]`;
-            }
+            if (!content.startsWith('[') && !content.endsWith(']')) { content = `[${content}]`; }
             try {
                 if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                
                 let textToParse = content;
-                if (local_jsonrepair) {
-                    try { textToParse = local_jsonrepair(content); } catch (e) {}
-                }
-                
+                if (local_jsonrepair) { try { textToParse = local_jsonrepair(content); } catch (e) {} }
+
                 const parsedData = JSON.parse(textToParse);
                 if (Array.isArray(parsedData)) operations.push(...parsedData);
                 else if (typeof parsedData === 'object' && parsedData !== null) operations.push(parsedData);
@@ -677,42 +691,39 @@ $((() => {
         return operations;
     }
 
-    // --- Restored & Optimized V5/V6 History Crawler ---
     async function buildStateFromHistory(targetIndex) {
         const chat = SillyTavern.getContext().chat;
         let rebuiltState = goodCopy(INITIAL_STATE);
         let checkpointIndex = -1;
-        
+
         if (samData) {
             rebuiltState.jsondb = samData.jsondb;
             rebuiltState.responseSummary = _.cloneDeep(samData.responseSummary);
             rebuiltState.summary_progress = samData.summary_progress;
         }
 
-        // 1. Trace BACKWARDS to find the latest Checkpoint (V6 or V5)
+        // 1. Trace BACKWARDS to find the latest Checkpoint
         for (let i = targetIndex; i >= 0; i--) {
             const msg = chat[i];
             if (!msg || msg.is_user) continue;
-            
-            // Try V6 Checkpoint
+
             const v6Match = msg.mes.match(CHECKPOINT_REGEX);
             if (v6Match && v6Match[1]) {
-                try { 
+                try {
                     const parsed = JSON.parse(v6Match[1].trim());
                     rebuiltState = _.merge({}, rebuiltState, parsed);
-                    checkpointIndex = i; 
-                    break; 
+                    checkpointIndex = i;
+                    break;
                 } catch (e) {}
             }
-            
-            // Try V5 Legacy Checkpoint
+
             const v5Match = msg.mes.match(OLD_STATE_PARSE_REGEX);
             if (v5Match && v5Match[1]) {
-                try { 
+                try {
                     const parsed = JSON.parse(v5Match[1].trim());
                     rebuiltState = _.merge({}, rebuiltState, parsed);
-                    checkpointIndex = i; 
-                    break; 
+                    checkpointIndex = i;
+                    break;
                 } catch (e) {}
             }
         }
@@ -726,11 +737,11 @@ $((() => {
         // 3. Trace FORWARD from the checkpoint
         const startIndex = checkpointIndex === -1 ? 0 : checkpointIndex + 1;
         const limit = Math.min(targetIndex, chat.length - 1);
-        
+
         for (let i = startIndex; i <= limit; i++) {
             const msg = chat[i];
             if (!msg || msg.is_user) continue;
-            
+
             const ops = await extractOperationsFromText(msg.mes);
             if (ops.length > 0) {
                 const { state } = await applyOperationsToState(ops, rebuiltState, false);
@@ -739,17 +750,46 @@ $((() => {
         }
         return rebuiltState;
     }
-  
+
+    // [RESTORED FROM V5] Exact memory caching logic
+    async function loadStateToMemory(targetIndex) {
+
+        console.log("Loading state to memory for target index:", targetIndex);
+        const chat = SillyTavern.getContext().chat;
+        if (targetIndex === "{{lastMessageId}}") { targetIndex = chat.length - 1; }
+        
+        let state = await buildStateFromHistory(targetIndex);
+        
+        console.log("Reconstruction from index", targetIndex, "completed.");
+        console.log("State after reconstruction:", state);
+        if (targetIndex === 0) {
+            const baseData = await getBaseDataFromWI();
+            if (baseData) { state.static = _.merge({}, state.static, baseData); }
+        }
+        
+        samData = state; 
+        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
+        return state;
+    }
+
+    // [RESTORED FROM V5] The explicit sync function
+    async function sync_latest_state() {
+        logger.info("Synchronizing SAM state with the latest chat history.");
+        let lastAiIndex = findLastAiMessageAndIndex();
+        await loadStateToMemory(lastAiIndex);
+        if (UI_STATE.panelOpen) { renderTabContent(); }
+    }
+
     // ========================================================================
     // 7. 自动总结 (Auto-Summary) & 数据写入流程
     // ========================================================================
     async function triggerSummaryCheck(currentIndex) {
         await checkWorldInfoActivation();
         if (!go_flag || !samSettings.data_enable) return;
-        
+
         const period = samSettings.summary_levels.L2.frequency;
         const last_progress = samData.summary_progress || 0;
-        
+
         if (currentIndex - last_progress >= period) {
             logger.info(`Summary threshold reached (${currentIndex - last_progress}/${period}).`);
             curr_state = STATES.SUMMARIZING; updateUIStatus();
@@ -757,20 +797,17 @@ $((() => {
             curr_state = STATES.IDLE; updateUIStatus();
         }
     }
-  
+
     async function processSummarizationRun(startIndex, endIndex, force = false) {
         const chat = SillyTavern.getContext().chat;
         if (!samData.responseSummary) samData.responseSummary = { L1:[], L2:[], L3:[] };
-        
-        if (force) {
-            samData.responseSummary.L2 = samData.responseSummary.L2.filter(s => s.index_begin >= endIndex || s.index_end <= startIndex);
-        }
-  
+
+        if (force) { samData.responseSummary.L2 = samData.responseSummary.L2.filter(s => s.index_begin >= endIndex || s.index_end <= startIndex); }
+
         const msgs = chat.slice(startIndex, endIndex);
         if (msgs.length === 0) return false;
-        
+
         const contentStr = msgs.map(m => {
-            // Stripping all update blocks and legacy checkpoint blocks prior to prompt insertion
             let processed = m.mes
                 .replace(CHECKPOINT_STRIP_REGEX, '')
                 .replace(OLD_STATE_REMOVE_REGEX, '')
@@ -779,10 +816,10 @@ $((() => {
             samSettings.regexes.forEach(rx => { if(rx.enabled && rx.regex_body) try { processed = processed.replace(new RegExp(rx.regex_body, 'g'), ''); }catch(e){} });
             return `${m.name}: ${processed}`;
         }).join('\n');
-  
+
         const db_content = sam_db && sam_db.isInitialized ? Object.entries(sam_db.getAllMemosAsObject()).map(([k,v])=>`Key: ${k}\nContent: ${v}`).join('\n\n') : "无现有设定";
         const promptL2 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt, { db_content, chat_content: contentStr });
-        
+
         let resultL2;
         if (typeof toastr !== 'undefined') toastr.info("[SAM] 开始生成摘要...");
         try {
@@ -793,27 +830,26 @@ $((() => {
             }
         } catch (e) {
             logger.error("L2 Summary failed", e);
-            if (typeof toastr !== 'undefined') toastr.error(`L2 摘要失败: ${e.message}`); return false; }
-  
+            if (typeof toastr !== 'undefined') toastr.error(`L2 摘要失败: ${e.message}`); return false; 
+        }
+
         if (!resultL2) return false;
-  
+
         const dbOperations = await extractOperationsFromText(resultL2);
         for (const op of dbOperations) {
             if (op.op === 'insert' && op.path && op.value && typeof op.value.content === 'string') {
                 const pathParts = op.path.split('/');
                 const key = pathParts[pathParts.length - 1];
-                if (key) {
-                   sam_db.setMemo(key, op.value.content, Array.isArray(op.value.keywords) ? op.value.keywords :[]);
-                }
+                if (key) { sam_db.setMemo(key, op.value.content, Array.isArray(op.value.keywords) ? op.value.keywords :[]); }
             }
         }
-  
+
         const cleanL2 = resultL2.replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim();
-  
+
         if (cleanL2) {
             samData.responseSummary.L2.push({ index_begin: startIndex, index_end: endIndex, content: cleanL2, level: 0 });
             samData.summary_progress = endIndex;
-  
+
             const l3Set = samSettings.summary_levels.L3;
             if (l3Set.enabled && samData.responseSummary.L2.length >= l3Set.frequency) {
                 const toCondense = samData.responseSummary.L2.slice(-l3Set.frequency);
@@ -828,7 +864,7 @@ $((() => {
                     }
                 } catch(e) {}
             }
-  
+
             if (sam_db.isInitialized) samData.jsondb = sam_db.export();
             await applyDataToChat(samData);
             if (typeof toastr !== 'undefined') toastr.success("[SAM] 摘要生成完成");
@@ -837,105 +873,215 @@ $((() => {
         }
         return false;
     }
-  
+
     async function processMessageState(index) {
-        const chat = SillyTavern.getContext().chat;
-        if (!chat[index] || chat[index].is_user) return;
-        
-        let state = goodCopy(samData);
-        let messageContent = chat[index].mes;
+        if (isProcessingState) { return; }
+        isProcessingState = true;
 
-        const opsFromMessage = await extractOperationsFromText(messageContent);
-        const periodicOps = samFunctions.filter(f => f.periodic).map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
-        
-        // Pass `true` to indicate live generation, enabling Auto-Diff logging
-        const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state, true);
-        samData = newState;
-        
-        let contentUpdated = false;
+        try {
+            const chat = SillyTavern.getContext().chat;
+            if (index === "{{lastMessageId}}") { index = chat.length - 1; }
+            const lastAIMessage = chat[index];
+            if (!lastAIMessage || lastAIMessage.is_user) return;
 
-        if (generatedDiffs && generatedDiffs.length > 0) {
-            const updatedOps =[...opsFromMessage, ...generatedDiffs];
-            const newBlockContent = JSON.stringify(updatedOps, null, 2);
+            // [RESTORED FROM V5] Strict use of the prevState cache
+            let state;
+            if (prevState) { state = goodCopy(prevState); }
+            else { state = await buildStateFromHistory(index - 1); }
+
+            let messageContent = lastAIMessage.mes;
+
+            const opsFromMessage = await extractOperationsFromText(messageContent);
+            const periodicOps = samFunctions.filter(f => f.periodic).map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
+
+            const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state, true);
+            samData = newState;
             
-            UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0;
-            if (UPDATE_BLOCK_EXTRACT_REGEX.test(messageContent)) {
-                messageContent = messageContent.replace(UPDATE_BLOCK_REMOVE_REGEX, `<JSONPatch>\n${newBlockContent}\n</JSONPatch>`);
-            } else {
-                messageContent += `\n<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
+            //[RESTORED FROM V5] Immediately push updated variable memory
+            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newState)); return variables });
+
+            // [RESTORED FROM V5] Explicit cleanup to prevent duplicate blocks
+            let cleanNarrative = messageContent
+                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '')
+                .trim();
+
+            let appendedLogs = "";
+            if (generatedDiffs && generatedDiffs.length > 0) {
+                const updatedOps =[...opsFromMessage, ...generatedDiffs];
+                const newBlockContent = JSON.stringify(updatedOps, null, 2);
+                appendedLogs = `\n\n<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
+            } else if (opsFromMessage.length > 0) {
+                const newBlockContent = JSON.stringify(opsFromMessage, null, 2);
+                appendedLogs = `\n\n<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
             }
-            contentUpdated = true;
+            
+            cleanNarrative += appendedLogs;
+
+            const currentRound = chat.filter(m => !m.is_user).length;
+            const shouldCheckpoint = samSettings.enable_auto_checkpoint &&
+                                     samSettings.auto_checkpoint_frequency > 0 &&
+                                     (currentRound > 0 && (currentRound % samSettings.auto_checkpoint_frequency === 0 || index === 0));
+
+            if (shouldCheckpoint) {
+                const stateString = await chunkedStringify(samData);
+                cleanNarrative += `\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
+            }
+
+            chat[index].mes = cleanNarrative;
+            await TavernHelper.setChatMessages([{ message_id: index, message: cleanNarrative }]);
+
+            await applyDataToChat(samData);
+        } catch (error) {
+            logger.error("Error in processMessageState:", error);
+        } finally {
+            isProcessingState = false;
         }
-
-        // Restored Checkpoint Logic
-        const currentRound = chat.filter(m => !m.is_user).length;
-        const shouldCheckpoint = samSettings.enable_auto_checkpoint && 
-                                 samSettings.auto_checkpoint_frequency > 0 && 
-                                 (currentRound > 0 && currentRound % samSettings.auto_checkpoint_frequency === 0);
-
-        if (shouldCheckpoint) {
-            const stateString = await chunkedStringify(samData);
-            const checkpointBlock = `\n\n${CHECKPOINT_MARKER}\n<SAMCheckpoint>\n${stateString}\n</SAMCheckpoint>`;
-            messageContent += checkpointBlock;
-            contentUpdated = true;
-        }
-
-        if (contentUpdated) {
-            chat[index].mes = messageContent;
-            await TavernHelper.setChatMessages([{ message_id: index, message: messageContent }]);
-        }
-
-        await applyDataToChat(samData);
     }
-  
+
     async function applyDataToChat(data) {
         await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(data)); return variables });
+        await setChatMessages([{"message_id": SillyTavern.getContext().chat.length - 1},
+            {"message_id": SillyTavern.getContext().chat.length - 2}
+            ]
+        );
+    }
 
-        //SillyTavern.getContext().variables.local.set("SAM_data", data);
-    }
-  
-    async function dispatcher(event) {
+    // ========================================================================
+    // [RESTORED FROM V5] FSM Dispatcher & Event Handling
+    // ========================================================================
+
+    async function dispatcher(event, ...args) {
+        console.log(`[Dispatcher] Received Event: ${event}, Args:`, args);
         try {
-            if (curr_state === STATES.IDLE && (event === tavern_events.MESSAGE_SENT || event === tavern_events.GENERATION_STARTED)) {
-                if (current_run_is_dry) return;
-                curr_state = STATES.AWAIT_GENERATION;
-            } else if (curr_state === STATES.AWAIT_GENERATION && event === tavern_events.GENERATION_ENDED) {
-                if (current_run_is_dry) { current_run_is_dry = false; return; }
-                curr_state = STATES.PROCESSING; updateUIStatus();
-                const chatLen = SillyTavern.getContext().chat.length;
-                await processMessageState(chatLen - 1);
-                await triggerSummaryCheck(chatLen);
-                curr_state = STATES.IDLE; updateUIStatus();
-            } else if (event === tavern_events.GENERATION_STOPPED) {
-                curr_state = STATES.IDLE; updateUIStatus();
+            switch (curr_state) {
+                case STATES.IDLE:
+                    switch (event) {
+                        case tavern_events.MESSAGE_SENT:
+                        case tavern_events.GENERATION_STARTED:
+
+                            const type = args[0];
+                            
+                            if (args[2]) { return; }
+                            
+                            if (type === "swipe" || type === "regenerate") {
+                                console.log(`Processing swipe or regenerate event, reconstructing from index ${findLatestUserMsgIndex()}`);
+                                await loadStateToMemory(findLatestUserMsgIndex());
+                                prevState = goodCopy(samData);
+                            } else if (event === tavern_events.MESSAGE_SENT) {
+                                const lastAiIndex = findLastAiMessageAndIndex();
+                                prevState = await loadStateToMemory(lastAiIndex);
+                            }
+                            
+                            curr_state = STATES.AWAIT_GENERATION;
+                            startGenerationWatcher();
+                            break;
+
+                        case tavern_events.MESSAGE_SWIPED:
+                        case tavern_events.MESSAGE_DELETED:
+                        case tavern_events.MESSAGE_EDITED:
+                        case tavern_events.CHAT_CHANGED:
+                            console.log(`common sync triggered by event ${event}`);
+                            await sync_latest_state();
+                            prevState = goodCopy(samData);
+                            break;
+                    }
+                    break;
+
+                case STATES.AWAIT_GENERATION:
+                    switch (event) {
+                        case tavern_events.GENERATION_STOPPED:
+                        case FORCE_PROCESS_COMPLETION:
+                        case tavern_events.GENERATION_ENDED:
+                            stopGenerationWatcher();
+                            if (current_run_is_dry) { current_run_is_dry = false; break; }
+                            
+                            curr_state = STATES.PROCESSING;
+                            updateUIStatus();
+                            
+                            const chatLen = SillyTavern.getContext().chat.length;
+                            await processMessageState(chatLen - 1);
+                            await triggerSummaryCheck(chatLen);
+                            
+                            curr_state = STATES.IDLE;
+                            prevState = null; // Clear snapshot properly
+                            break;
+                        case tavern_events.CHAT_CHANGED:
+                            stopGenerationWatcher();
+                            await sync_latest_state();
+                            prevState = goodCopy(samData);
+                            curr_state = STATES.IDLE;
+                            break;
+                    }
+                    break;
+                
+                case STATES.PROCESSING:
+                case STATES.SUMMARIZING:
+                    logger.warn(`[FSM] Received event ${event} while in ${curr_state} state. Ignoring.`);
+                    break;
             }
-        } catch (e) { logger.error("Dispatcher Error:", e); curr_state = STATES.IDLE; updateUIStatus(); }
+        } catch (e) {
+            logger.error(`[Dispatcher] FSM failed. Error: ${e}`);
+            stopGenerationWatcher();
+            curr_state = STATES.IDLE;
+            prevState = null;
+            isProcessingState = false;
+        }
+        updateUIStatus();
     }
-  
+
     async function unified_dispatch_executor() {
-        if (isDispatching) return; isDispatching = true;
-        while (event_queue.length > 0) await dispatcher(event_queue.shift());
+        if (isDispatching) return;
+        isDispatching = true;
+        while (event_queue.length > 0) {
+            const { event_id, args } = event_queue.shift();
+            try { 
+                    await dispatcher(event_id, ...args); 
+                } 
+                catch (error) { 
+                    logger.error(`Unhandled error during dispatch of ${event_id}:`, error); 
+                curr_state = STATES.IDLE;
+            }
+        }
         isDispatching = false;
-        if (event_queue.length > 0) setTimeout(() => unified_dispatch_executor(), 10);
+        if (event_queue.length > 0) { 
+            setTimeout(() => unified_dispatch_executor(), 10); 
+        }
     }
-    const pushEvent = (ev) => { 
-        event_queue.push(ev);
-        unified_dispatch_executor();
+
+    async function unifiedEventHandler(event, ...args) {
+        // Yielding to main thread like in V5
+        setTimeout(() => {
+            event_queue.push({ event_id: event, args: [...args] });
+            unified_dispatch_executor();
+        }, 0);
+    }
+
+    const handlers = {
+        handleMessageSent: () => unifiedEventHandler(tavern_events.MESSAGE_SENT),
+        handleGenerationStarted: async (ev, options, dry_run) => await unifiedEventHandler(tavern_events.GENERATION_STARTED, ev, options, dry_run),
+        handleGenerationEnded: () => unifiedEventHandler(tavern_events.GENERATION_ENDED),
+        handleGenerationStopped: () => unifiedEventHandler(tavern_events.GENERATION_STOPPED),
+        handleMessageSwiped: () => unifiedEventHandler(tavern_events.MESSAGE_SWIPED),
+        handleMessageDeleted: () => unifiedEventHandler(tavern_events.MESSAGE_DELETED),
+        handleMessageEdited: () => unifiedEventHandler(tavern_events.MESSAGE_EDITED),
+        handleChatChanged: () => unifiedEventHandler(tavern_events.CHAT_CHANGED),
     };
-  
+
     // ========================================================================
     // 8. 内部悬浮窗 UI & 样式构建
     // ========================================================================
     function updateUIStatus() {
         if (k.statusText) {
             k.statusText.textContent = `引擎状态: ${curr_state} | 数据: ${go_flag && samSettings.data_enable ? '活跃' : '休眠'}`;
-            k.statusText.style.color =["PROCESSING", "SUMMARIZING"].includes(curr_state) ? "#f0ad4e" : "#5cb85c";
+            k.statusText.style.color =["PROCESSING", "SUMMARIZING", "AWAIT_GENERATION"].includes(curr_state) ? "#f0ad4e" : "#5cb85c";
         }
         if (k.depsText) {
             const jr = local_jsonrepair ? 'green' : 'red';
             const ms = local_MiniSearch ? 'green' : 'red';
-            const jp = 'green'; // Hardcoded module avoids external dependencies
-            
+            const jp = 'green';
+
             k.depsText.innerHTML = `
                 <div class="sam_dep_indicator" title="jsonrepair"><div class="sam_dep_dot ${jr}"></div></div>
                 <div class="sam_dep_indicator" title="MiniSearch"><div class="sam_dep_dot ${ms}"></div></div>
@@ -964,24 +1110,11 @@ $((() => {
         k.widget.style.left = `${safeLeft}px`;
         k.widget.style.top = `${safeTop}px`;
         
-        if (saveState) {
-            UI_STATE.uiLeft = safeLeft;
-            UI_STATE.uiTop = safeTop;
-        }
+        if (saveState) { UI_STATE.uiLeft = safeLeft; UI_STATE.uiTop = safeTop; }
     }
 
-    function An() {
-        if (!k.widget) return;
-        const rect = k.widget.getBoundingClientRect();
-        Tn(rect.left, rect.top, false);
-    }
-    
-    function En() {
-        if (!k.widget) return;
-        const rect = k.widget.getBoundingClientRect();
-        UI_STATE.uiLeft = rect.left;
-        UI_STATE.uiTop = rect.top;
-    }
+    function An() { if (!k.widget) return; const rect = k.widget.getBoundingClientRect(); Tn(rect.left, rect.top, false); }
+    function En() { if (!k.widget) return; const rect = k.widget.getBoundingClientRect(); UI_STATE.uiLeft = rect.left; UI_STATE.uiTop = rect.top; }
   
     function Nn() {
         if (!v.head) return;
@@ -1201,28 +1334,21 @@ $((() => {
                 const text = C.querySelector('#data_json_area')?.value;
                 if(text) {
                     let parsed; 
-                    try { 
-                        parsed = JSON.parse(text); 
-                    } catch(e) { 
+                    try { parsed = JSON.parse(text); } 
+                    catch(e) { 
                         if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                        if (local_jsonrepair) {
-                            parsed = JSON.parse(local_jsonrepair(text));
-                        } else {
-                            throw new Error("JSON invalid & jsonrepair fallback not available.");
-                        }
+                        if (local_jsonrepair) { parsed = JSON.parse(local_jsonrepair(text)); } 
+                        else { throw new Error("JSON invalid & jsonrepair fallback not available."); }
                     }
                     samData = parsed;
                 }
                 
                 C.querySelectorAll('.sam_summary_display textarea').forEach(area => {
                     const {level, idx} = area.dataset;
-                    if (samData.responseSummary[level]?.[idx]) {
-                         samData.responseSummary[level][idx].content = area.value;
-                    }
+                    if (samData.responseSummary[level]?.[idx]) { samData.responseSummary[level][idx].content = area.value; }
                 });
 
                 await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
-
                 toastr.success("数据已更新至本地变量");
             } catch(e) { toastr.error(`JSON解析或提交失败: ${e.message}`); }
         };
@@ -1246,11 +1372,7 @@ $((() => {
                 curr_state = STATES.IDLE; updateUIStatus();
             };
             C.querySelectorAll('.sam_summary_display .sam_delete_icon').forEach(icon => {
-                icon.onclick = (e) => {
-                    const {level, idx} = e.target.dataset;
-                    samData.responseSummary[level].splice(idx, 1);
-                    renderTabContent();
-                };
+                icon.onclick = (e) => { const {level, idx} = e.target.dataset; samData.responseSummary[level].splice(idx, 1); renderTabContent(); };
             });
             C.querySelector('#btn_commit_data').onclick = commitDataFromUI;
         }
@@ -1275,8 +1397,7 @@ $((() => {
                 const reader = new FileReader();
                 reader.onload = (ev) => {
                     try {
-                        const newSettings = JSON.parse(ev.target.result);
-                        Object.assign(samSettings, newSettings);
+                        const newSettings = JSON.parse(ev.target.result); Object.assign(samSettings, newSettings);
                         saveSamSettings(); toastr.success("设置已导入");
                     } catch(err) { toastr.error("导入失败"); }
                 };
@@ -1304,13 +1425,10 @@ $((() => {
                     if(isFunc) await saveFunctionsToWI(samFunctions); else { samSettings.regexes = sourceArr; saveSamSettings(); toastr.success("正则表达式已保存"); }
                 };
                 C.querySelector(`#${listId}`).onclick = (e) => {
-                    const li = e.target.closest('li');
-                    if(!li) return;
+                    const li = e.target.closest('li'); if(!li) return;
                     const idx = parseInt(li.dataset.idx);
-                    if (e.target.classList.contains('sam_delete_icon')) {
-                        sourceArr.splice(idx, 1);
-                        if (UI_STATE[selectedIdx] === idx) UI_STATE[selectedIdx] = -1;
-                    } else { UI_STATE[selectedIdx] = idx; }
+                    if (e.target.classList.contains('sam_delete_icon')) { sourceArr.splice(idx, 1); if (UI_STATE[selectedIdx] === idx) UI_STATE[selectedIdx] = -1; } 
+                    else { UI_STATE[selectedIdx] = idx; }
                     renderTabContent();
                 };
                 const detail = C.querySelector('.sam_detail');
@@ -1379,9 +1497,7 @@ $((() => {
         if (UI_STATE.panelOpen === open && !initial) return;
         UI_STATE.panelOpen = open;
         k.panel.hidden = !open;
-        if (open) {
-            renderTabContent();
-        }
+        if (open) { renderTabContent(); }
         An();
     }
 
@@ -1391,7 +1507,6 @@ $((() => {
         let wd = v.getElementById(WATCHDOG_ID);
         if (wd) wd.remove();
         
-        // 注入原生环境的看门狗脚本 (脱离 Tampermonkey 沙盒，免疫上下文销毁)
         wd = v.createElement("script");
         wd.id = WATCHDOG_ID;
         wd.textContent = `
@@ -1412,25 +1527,16 @@ $((() => {
                             clearInterval(checkInterval);
                             console.log('[SAM Watchdog] 核心引擎已断开，失效悬浮窗已自动清理。');
                         }
-                    } else {
-                        strikes = 0;
-                        lastSeenBeat = currentBeat;
-                    }
+                    } else { strikes = 0; lastSeenBeat = currentBeat; }
                 }, 2000);
             })();
         `;
         v.body.appendChild(wd);
         
-        // 在核心环境开启心跳
         let beatCount = 1;
         if (k.widget) k.widget.setAttribute('data-beat', beatCount.toString());
-        const hb = setInterval(() => {
-            if (k.widget) {
-                beatCount++;
-                k.widget.setAttribute('data-beat', beatCount.toString());
-            }
-        }, 2000);
-        cleanup_pool.push(() => clearInterval(hb)); // 注册到清理池，正常退出时自动终止心跳
+        const hb = setInterval(() => { if (k.widget) { beatCount++; k.widget.setAttribute('data-beat', beatCount.toString()); } }, 2000);
+        cleanup_pool.push(() => clearInterval(hb)); 
     }
 
     function buildWidgetHTML() {
@@ -1478,12 +1584,7 @@ $((() => {
             
             if (!k.widget || !k.panel || !k.fab || !k.header) throw new Error("Missing Elements");
             
-            // 1. Click to toggle
-            add_event_listener(k.fab, "click", () => {
-                if ("1" !== k.widget?.dataset?.dragging) {
-                    togglePanel(!UI_STATE.panelOpen);
-                }
-            });
+            add_event_listener(k.fab, "click", () => { if ("1" !== k.widget?.dataset?.dragging) { togglePanel(!UI_STATE.panelOpen); } });
             add_event_listener(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
             add_event_listener(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(true); renderTabContent(); toastr.info("数据已重载"); });
             
@@ -1496,59 +1597,39 @@ $((() => {
                 });
             });
 
-            // 3. Exact Drag Logic matching reference
             (function () {
                 if (!k.widget || !k.fab || !k.header) return;
-                
                 const dragState = { active: false, pointerId: null, startX: 0, startY: 0, originLeft: 0, originTop: 0, moved: false };
                 
-                function isInteractive(node) {
-                    return !!node && typeof node.closest === "function" && !!node.closest("button, input, select, textarea, label, a, .sam_toggle");
-                }
+                function isInteractive(node) { return !!node && typeof node.closest === "function" && !!node.closest("button, input, select, textarea, label, a, .sam_toggle"); }
     
                 function onPointerDown(n) {
                     if ("mouse" === n.pointerType && 0 !== n.button) return;
                     if (n.currentTarget === k.header && isInteractive(n.target)) return;
                     
                     const rect = k.widget.getBoundingClientRect();
-                    dragState.active = true;
-                    dragState.pointerId = Number.isFinite(n.pointerId) ? n.pointerId : null;
-                    dragState.startX = n.clientX;
-                    dragState.startY = n.clientY;
-                    dragState.originLeft = rect.left;
-                    dragState.originTop = rect.top;
-                    dragState.moved = false;
-                    k.widget.dataset.dragging = "0";
+                    dragState.active = true; dragState.pointerId = Number.isFinite(n.pointerId) ? n.pointerId : null;
+                    dragState.startX = n.clientX; dragState.startY = n.clientY;
+                    dragState.originLeft = rect.left; dragState.originTop = rect.top;
+                    dragState.moved = false; k.widget.dataset.dragging = "0";
                     
-                    if (typeof n.currentTarget?.setPointerCapture === "function" && null !== dragState.pointerId) {
-                        try { n.currentTarget.setPointerCapture(dragState.pointerId); } catch (err) {}
-                    }
+                    if (typeof n.currentTarget?.setPointerCapture === "function" && null !== dragState.pointerId) { try { n.currentTarget.setPointerCapture(dragState.pointerId); } catch (err) {} }
                     n.preventDefault();
                 }
     
                 function onPointerMove(t) {
                     if (!dragState.active) return;
                     if (null !== dragState.pointerId && t.pointerId !== dragState.pointerId) return;
-                    
-                    const dx = t.clientX - dragState.startX;
-                    const dy = t.clientY - dragState.startY;
-                    
-                    if (Math.abs(dx) + Math.abs(dy) > 4) {
-                        dragState.moved = true;
-                        k.widget.dataset.dragging = "1";
-                    }
+                    const dx = t.clientX - dragState.startX; const dy = t.clientY - dragState.startY;
+                    if (Math.abs(dx) + Math.abs(dy) > 4) { dragState.moved = true; k.widget.dataset.dragging = "1"; }
                     Tn(dragState.originLeft + dx, dragState.originTop + dy, false);
                 }
     
                 function onPointerUp(t) {
                     if (dragState.active) {
                         if (null !== dragState.pointerId && t && Number.isFinite(t.pointerId) && t.pointerId !== dragState.pointerId) return;
-                        dragState.active = false;
-                        dragState.pointerId = null;
-                        En();
-                        setTimeout(() => {
-                            if (k.widget) k.widget.dataset.dragging = "0";
-                        }, 0);
+                        dragState.active = false; dragState.pointerId = null; En();
+                        setTimeout(() => { if (k.widget) k.widget.dataset.dragging = "0"; }, 0);
                     }
                 }
     
@@ -1559,98 +1640,79 @@ $((() => {
                 add_event_listener(v, "pointercancel", onPointerUp);
             })();
             
-            // 4. Initialization
             togglePanel(UI_STATE.panelOpen, true);
             if (null === UI_STATE.uiLeft || null === UI_STATE.uiTop) {
-                const fabSize = UI_STATE.fabSizePx;
-                const padding = 16;
+                const fabSize = UI_STATE.fabSizePx; const padding = 16;
                 const defaultLeft = y.innerWidth - fabSize - padding;
                 const defaultTop = Math.max(padding, Math.min(y.innerHeight - fabSize - padding, 120));
                 Tn(defaultLeft, defaultTop, true);
-            } else {
-                Tn(UI_STATE.uiLeft, UI_STATE.uiTop, true);
-            }
+            } else { Tn(UI_STATE.uiLeft, UI_STATE.uiTop, true); }
             add_event_listener(y, "resize", () => { An(); En(); });
 
             setupWatchdog();
 
             return true;
-        } catch (e) {
-            logger.error("Widget creation failed:", e);
-            return false;
-        }
+        } catch (e) { logger.error("Widget creation failed:", e); return false; }
     }
-  
+    
     // ========================================================================
     // 9. 初始化与上下文加载
     // ========================================================================
     async function loadContextData(forceRebuild = false) {
         await checkWorldInfoActivation();
-        
+
         if (!go_flag) {
             logger.info("SAM identifier not found. Icon committing suicide.");
             cleanupDOM();
             return;
         }
-        
+
         if (!k.widget) {
             logger.info("SAM identifier found. Resurrecting icon.");
             Nn();
-            if (!buildWidgetHTML()) {
-                logger.error("Icon failed to resurrect.");
-                return;
-            }
+            if (!buildWidgetHTML()) { logger.error("Icon failed to resurrect."); return; }
         }
 
         loadSamSettings();
         samFunctions = await getFunctionsFromWI();
-        
-        if (forceRebuild) {
-            // Rebuild from message 0 up to current to prevent state desync
-            const chatLen = SillyTavern.getContext().chat.length;
-            let targetIndex = chatLen - 1;
-            while (targetIndex >= 0 && SillyTavern.getContext().chat[targetIndex].is_user) {
-                targetIndex--;
-            }
-            if (targetIndex < 0) targetIndex = 0;
-            samData = await buildStateFromHistory(targetIndex);
-            // SillyTavern.getContext().variables.local.set("SAM_data", samData);
-            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
 
+        if (forceRebuild) {
+            await sync_latest_state();
         } else {
             let d = SillyTavern.getContext().variables.local.get("SAM_data");
-            if (d && typeof d === 'object') { 
-                _.defaultsDeep(d, INITIAL_STATE); 
-                samData = d; 
-            } else { 
-                samData = await buildStateFromHistory(SillyTavern.getContext().chat.length - 1); 
-                //SillyTavern.getContext().variables.local.set("SAM_data", samData); 
-                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
-            }
+            if (d && typeof d === 'object') {
+                _.defaultsDeep(d, INITIAL_STATE);
+                samData = d;
+            } else { await sync_latest_state(); }
         }
-        
+
         await initializeDatabase(samData.jsondb);
         updateUIStatus();
     }
 
     // Manual Event Triggers corresponding to custom UI Buttons
     async function manualCheckpoint() {
-        if (isCheckpointing || curr_state !== STATES.IDLE) return;
+        if (isCheckpointing || isProcessingState || curr_state !== STATES.IDLE) return;
         isCheckpointing = true;
         try {
             const chat = SillyTavern.getContext().chat;
-            let lastAiIndex = -1;
-            for (let i = chat.length - 1; i >= 0; i--) {
-                if (chat[i] && !chat[i].is_user) { lastAiIndex = i; break; }
-            }
+            let lastAiIndex = findLastAiMessageAndIndex();
             if (lastAiIndex === -1) return;
+
+            const lastAiMessage = chat[lastAiIndex];
             
+            // [RESTORED FROM V5] Explicit cleanup of old blocks first
+            const cleanNarrative = lastAiMessage.mes
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '')
+                .trim();
+
             const stateString = await chunkedStringify(samData);
-            const checkpointBlock = `\n\n${CHECKPOINT_MARKER}\n<SAMCheckpoint>\n${stateString}\n</SAMCheckpoint>`;
-            
-            chat[lastAiIndex].mes += checkpointBlock;
-            await TavernHelper.setChatMessages([{ message_id: lastAiIndex, message: chat[lastAiIndex].mes }]);
-            toastr.success("手动检查点已创建 (SAM Checkpoint created)");
+            const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
+
+            chat[lastAiIndex].mes = finalContent;
+            await TavernHelper.setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
+            toastr.success("手动检查点已创建 (Manual checkpoint created)");
         } catch(e) {
             logger.error("Manual checkpoint failed", e);
             toastr.error("检查点创建失败");
@@ -1661,44 +1723,34 @@ $((() => {
 
     async function manualReset() {
         try {
-            const chatLen = SillyTavern.getContext().chat.length;
-            let targetIndex = chatLen - 1;
-            while (targetIndex >= 0 && SillyTavern.getContext().chat[targetIndex].is_user) {
-                targetIndex--;
-            }
-            if (targetIndex < 0) targetIndex = 0;
-            samData = await buildStateFromHistory(targetIndex);
-            //SillyTavern.getContext().variables.local.set("SAM_data", samData);
-            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
-
-
+            await sync_latest_state();
             toastr.success("SAM 内部状态已重置 (State reset)");
-        } catch(e) {
-            logger.error("Manual reset failed", e);
-            toastr.error("状态重置失败");
-        }
+        } catch(e) { logger.error("Manual reset failed", e); toastr.error("状态重置失败"); }
     }
-  
+
     async function initSAM() {
         if (typeof tavern_events === 'undefined') { logger.warn("Not in ST environment."); return; }
-        
-        // Pre-fetch dependencies to initialize indicators rapidly
+
+        //[RESTORED FROM V5] Clean up any old running instances first
+        cleanupPreviousInstance();
+
         loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
         loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
 
         loadSamSettings();
         apiManager = new APIManager({ initialPresets: samSettings.api_presets, onUpdate: (p) => { samSettings.api_presets = p; saveSamSettings(); } });
-        
-        bindTavernEvent(tavern_events.MESSAGE_SENT, () => pushEvent(tavern_events.MESSAGE_SENT));
-        bindTavernEvent(tavern_events.GENERATION_STARTED, (type, dry) => { if (dry) current_run_is_dry = true; else pushEvent(tavern_events.GENERATION_STARTED); });
-        bindTavernEvent(tavern_events.GENERATION_ENDED, () => pushEvent(tavern_events.GENERATION_ENDED));
-        bindTavernEvent(tavern_events.GENERATION_STOPPED, () => pushEvent(tavern_events.GENERATION_STOPPED));
-        
-        // Pass `true` to force crawler execution for state safety on destructive actions
-        bindTavernEvent(tavern_events.MESSAGE_SWIPED, async () => { await loadContextData(true); });
-        bindTavernEvent(tavern_events.MESSAGE_DELETED, async () => { await loadContextData(true); });
-        bindTavernEvent(tavern_events.MESSAGE_EDITED, async () => { await loadContextData(true); });
-        bindTavernEvent(tavern_events.CHAT_CHANGED, async () => { await loadContextData(true); });
+
+        eventMakeFirst(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
+        bindTavernEvent(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
+        bindTavernEvent(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
+        bindTavernEvent(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
+        bindTavernEvent(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
+        bindTavernEvent(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
+        bindTavernEvent(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
+        bindTavernEvent(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+
+        //[RESTORED FROM V5] Store new handlers for future cleanup
+        window[HANDLER_STORAGE_KEY] = handlers;
 
         try {
             if (typeof getButtonEvent === 'function' && typeof eventOn === 'function') {
@@ -1708,17 +1760,16 @@ $((() => {
                 if (checkpointEvent) eventOn(checkpointEvent, manualCheckpoint);
             }
         } catch (e) {}
-  
-        await loadContextData(true); // Always force rebuild on initial load to guarantee sync
-        
+
+        await loadContextData(true);
+
         logger.info(`SAM Core Engine V${SCRIPT_VERSION} fully loaded.`);
     }
 
-    const startup = () => {
-        initSAM();
-    };
-    
-    if (v.readyState === "loading") { add_event_listener(v, "DOMContentLoaded", startup, { once: true }); } 
+    const startup = () => { initSAM(); };
+
+    if (v.readyState === "loading") { add_event_listener(v, "DOMContentLoaded", startup, { once: true }); }
     else { startup(); }
-  
+
   })());
+// --- END OF FULLY INTEGRATED SAM V6 CODE ---
