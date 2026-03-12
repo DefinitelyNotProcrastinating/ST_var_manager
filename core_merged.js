@@ -889,7 +889,9 @@ $((() => {
     }
   
     async function applyDataToChat(data) {
-        SillyTavern.getContext().variables.local.set("SAM_data", data);
+        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(data)); return variables });
+
+        //SillyTavern.getContext().variables.local.set("SAM_data", data);
     }
   
     async function dispatcher(event) {
@@ -1610,7 +1612,9 @@ $((() => {
             }
             if (targetIndex < 0) targetIndex = 0;
             samData = await buildStateFromHistory(targetIndex);
-            SillyTavern.getContext().variables.local.set("SAM_data", samData);
+            // SillyTavern.getContext().variables.local.set("SAM_data", samData);
+            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
+
         } else {
             let d = SillyTavern.getContext().variables.local.get("SAM_data");
             if (d && typeof d === 'object') { 
@@ -1618,7 +1622,8 @@ $((() => {
                 samData = d; 
             } else { 
                 samData = await buildStateFromHistory(SillyTavern.getContext().chat.length - 1); 
-                SillyTavern.getContext().variables.local.set("SAM_data", samData); 
+                //SillyTavern.getContext().variables.local.set("SAM_data", samData); 
+                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
             }
         }
         
@@ -1661,7 +1666,10 @@ $((() => {
             }
             if (targetIndex < 0) targetIndex = 0;
             samData = await buildStateFromHistory(targetIndex);
-            SillyTavern.getContext().variables.local.set("SAM_data", samData);
+            //SillyTavern.getContext().variables.local.set("SAM_data", samData);
+            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
+
+
             toastr.success("SAM 内部状态已重置 (State reset)");
         } catch(e) {
             logger.error("Manual reset failed", e);
