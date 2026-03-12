@@ -760,8 +760,6 @@ $((() => {
         
         let state = await buildStateFromHistory(targetIndex);
         
-        console.log("Reconstruction from index", targetIndex, "completed.");
-        console.log("State after reconstruction:", state);
         if (targetIndex === 0) {
             const baseData = await getBaseDataFromWI();
             if (baseData) { state.static = _.merge({}, state.static, baseData); }
@@ -769,6 +767,7 @@ $((() => {
         
         samData = state; 
         await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
+        updateUIStatus();
         return state;
     }
 
@@ -963,10 +962,13 @@ $((() => {
 
                             const type = args[0];
                             
+                            // DO NOT CHANGE ORDERING. [2] is the dry_run flag, which should prevent any state changes if true. This is critical for correct handling of generation runs.
+                            // if you use args[1] it will read False, and return and early exit the cycle, causing silent fails
                             if (args[2]) { return; }
+
                             
                             if (type === "swipe" || type === "regenerate") {
-                                console.log(`Processing swipe or regenerate event, reconstructing from index ${findLatestUserMsgIndex()}`);
+                                logger.info(`Processing swipe or regenerate event, reconstructing from index ${findLatestUserMsgIndex()}`);
                                 await loadStateToMemory(findLatestUserMsgIndex());
                                 prevState = goodCopy(samData);
                             } else if (event === tavern_events.MESSAGE_SENT) {
@@ -1060,7 +1062,10 @@ $((() => {
 
     const handlers = {
         handleMessageSent: () => unifiedEventHandler(tavern_events.MESSAGE_SENT),
-        handleGenerationStarted: async (ev, options, dry_run) => await unifiedEventHandler(tavern_events.GENERATION_STARTED, ev, options, dry_run),
+        
+        // no matter what do not change this, ST formatting issue
+        handleGenerationStarted: async (event_obj, options, dry_run) => await unifiedEventHandler(tavern_events.GENERATION_STARTED, event_obj, options, dry_run),
+        
         handleGenerationEnded: () => unifiedEventHandler(tavern_events.GENERATION_ENDED),
         handleGenerationStopped: () => unifiedEventHandler(tavern_events.GENERATION_STOPPED),
         handleMessageSwiped: () => unifiedEventHandler(tavern_events.MESSAGE_SWIPED),
