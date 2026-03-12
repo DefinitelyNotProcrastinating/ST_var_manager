@@ -315,7 +315,7 @@ $((() => {
     // ========================================================================
     // 6. 基础工具与状态操作函数 (Refactored Core)
     // ========================================================================
-    function O(elem, type, listener, options) {
+    function add_event_listener(elem, type, listener, options) {
         if (elem && "function" == typeof elem.addEventListener && "function" == typeof elem.removeEventListener) {
             elem.addEventListener(type, listener, options);
             cleanup_pool.push(() => elem.removeEventListener(type, listener, options));
@@ -323,8 +323,8 @@ $((() => {
     }
     
     function bindTavernEvent(eventName, handler) {
-        if (typeof eventOn === 'function') eventOn(eventName, handler);
-        cleanup_pool.push(() => { if (typeof eventRemoveListener === 'function') eventRemoveListener(eventName, handler); });
+        eventOn(eventName, handler);
+        cleanup_pool.push(() => {eventRemoveListener(eventName, handler); });
     }
   
     // Sandboxed External Library Loader (Removes dependency on global window object)
@@ -1220,7 +1220,9 @@ $((() => {
                          samData.responseSummary[level][idx].content = area.value;
                     }
                 });
-                SillyTavern.getContext().variables.local.set("SAM_data", samData);
+
+                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
+
                 toastr.success("数据已更新至本地变量");
             } catch(e) { toastr.error(`JSON解析或提交失败: ${e.message}`); }
         };
@@ -1477,16 +1479,16 @@ $((() => {
             if (!k.widget || !k.panel || !k.fab || !k.header) throw new Error("Missing Elements");
             
             // 1. Click to toggle
-            O(k.fab, "click", () => {
+            add_event_listener(k.fab, "click", () => {
                 if ("1" !== k.widget?.dataset?.dragging) {
                     togglePanel(!UI_STATE.panelOpen);
                 }
             });
-            O(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
-            O(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(true); renderTabContent(); toastr.info("数据已重载"); });
+            add_event_listener(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
+            add_event_listener(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(true); renderTabContent(); toastr.info("数据已重载"); });
             
             c.querySelectorAll('.sam_tab').forEach(tab => {
-                O(tab, "click", (e) => {
+                add_event_listener(tab, "click", (e) => {
                     c.querySelectorAll('.sam_tab').forEach(t=>t.classList.remove('active'));
                     tab.classList.add('active');
                     UI_STATE.activeTab = tab.dataset.tab;
@@ -1550,11 +1552,11 @@ $((() => {
                     }
                 }
     
-                O(k.fab, "pointerdown", onPointerDown);
-                O(k.header, "pointerdown", onPointerDown);
-                O(v, "pointermove", onPointerMove);
-                O(v, "pointerup", onPointerUp);
-                O(v, "pointercancel", onPointerUp);
+                add_event_listener(k.fab, "pointerdown", onPointerDown);
+                add_event_listener(k.header, "pointerdown", onPointerDown);
+                add_event_listener(v, "pointermove", onPointerMove);
+                add_event_listener(v, "pointerup", onPointerUp);
+                add_event_listener(v, "pointercancel", onPointerUp);
             })();
             
             // 4. Initialization
@@ -1568,7 +1570,7 @@ $((() => {
             } else {
                 Tn(UI_STATE.uiLeft, UI_STATE.uiTop, true);
             }
-            O(y, "resize", () => { An(); En(); });
+            add_event_listener(y, "resize", () => { An(); En(); });
 
             setupWatchdog();
 
@@ -1716,7 +1718,7 @@ $((() => {
         initSAM();
     };
     
-    if (v.readyState === "loading") { O(v, "DOMContentLoaded", startup, { once: true }); } 
+    if (v.readyState === "loading") { add_event_listener(v, "DOMContentLoaded", startup, { once: true }); } 
     else { startup(); }
   
   })());
