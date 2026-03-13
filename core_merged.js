@@ -505,6 +505,15 @@ $((() => {
             try { sam_db.import(dbStateJson); } catch(e){}
         }
     }
+    function serialize_db() {
+        if (sam_db && sam_db.isInitialized) {
+            const allMemos = sam_db.getAllMemosAsObject(); // Assuming this is synchronous
+            if (allMemos && Object.keys(allMemos).length > 0) {
+                return Object.entries(allMemos).map(([k, v]) => `Key: ${k}\nContent: ${v}`).join('\n\n');
+            }
+        }
+        return "尚未储存任何设定。";
+    }
 
     async function runSandboxedFunction(funcName, params, state) {
         const funcDef = samFunctions.find(f => f.func_name === funcName);
@@ -1544,6 +1553,40 @@ $((() => {
         cleanup_pool.push(() => clearInterval(hb)); 
     }
 
+    function sync_getVariables() {
+        let data = SillyTavern.getContext().variables.local.get("SAM_data");
+        if (!data || typeof data !== 'object') {
+            data = goodCopy(INITIAL_STATE);
+        } else {
+            _.defaultsDeep(data, INITIAL_STATE);
+        }
+        return data;
+    }
+
+    function serialize_memory() {
+    const data = sync_getVariables();
+    let allSummaries = [];
+
+    // Combine L2 and L3 summaries, adding a 'level' property to each
+    if (data.responseSummary && Array.isArray(data.responseSummary.L2)) {
+        allSummaries = allSummaries.concat(data.responseSummary.L2.map(summary => ({ ...summary, level: 'L2' })));
+    }
+    if (data.responseSummary && Array.isArray(data.responseSummary.L3)) {
+        allSummaries = allSummaries.concat(data.responseSummary.L3.map(summary => ({ ...summary, level: 'L3' })));
+    }
+
+    // Sort the combin
+    // ed array by the beginning of their range
+    allSummaries.sort((a, b) => a.index_begin - b.index_begin);
+
+    // Format the sorted summaries into strings
+    const serialized_memory_parts = allSummaries.map(summary => {
+        return `[${summary.level} Summary | Range: ${summary.index_begin}-${summary.index_end}]: ${summary.content}`;
+    });
+
+    return serialized_memory_parts.join('\n');
+    }
+
     function buildWidgetHTML() {
         try {
             if (!v.body) return false;
@@ -1767,6 +1810,8 @@ $((() => {
         } catch (e) {}
 
         await loadContextData(true);
+        SillyTavern.getContext().registerMacro('SAM_serialized_memory', serialize_memory);
+        SillyTavern.getContext().registerMacro('SAM_serialized_db', serialize_db);
 
         logger.info(`SAM Core Engine V${SCRIPT_VERSION} fully loaded.`);
     }
