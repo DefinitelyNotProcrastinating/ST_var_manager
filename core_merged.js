@@ -42,8 +42,9 @@ $((() => {
         static: {}, time: "", dtime: 0, volatile:[],
         responseSummary: { L1:[], L2:[], L3:[] },
         summary_progress: 0,
+        summary_failed_progress: -1,
         jsondb: null,
-        func: [], events:[], event_counter: 0
+        func:[], events:[], event_counter: 0
     };
 
     // [RESTORED FROM V5] FSM States
@@ -709,6 +710,7 @@ $((() => {
             rebuiltState.jsondb = samData.jsondb;
             rebuiltState.responseSummary = _.cloneDeep(samData.responseSummary);
             rebuiltState.summary_progress = samData.summary_progress;
+            rebuiltState.summary_failed_progress = samData.summary_failed_progress || -1;
         }
 
         // 1. Trace BACKWARDS to find the latest Checkpoint
@@ -791,26 +793,67 @@ $((() => {
     // ========================================================================
     // 7. 自动总结 (Auto-Summary) & 数据写入流程
     // ========================================================================
+    
     async function triggerSummaryCheck(currentIndex) {
         await checkWorldInfoActivation();
         if (!go_flag || !samSettings.data_enable) return;
 
         const period = samSettings.summary_levels.L2.frequency;
         const last_progress = samData.summary_progress || 0;
+        const last_failed = samData.summary_failed_progress || -1;
+        
+        const effective_baseline = Math.max(last_progress, last_failed);
 
-        if (currentIndex - last_progress >= period) {
-            logger.info(`Summary threshold reached (${currentIndex - last_progress}/${period}).`);
+        if (currentIndex - effective_baseline >= period) {
+            logger.info(`Summary threshold reached (${currentIndex - effective_baseline}/${period}).`);
             curr_state = STATES.SUMMARIZING; updateUIStatus();
-            await processSummarizationRun(last_progress, currentIndex);
+            
+            const oldProgress = samData.summary_progress;
+            await processBatchSummarizationRun(currentIndex, false);
+            
+            if (samData.summary_progress === oldProgress) {
+                samData.summary_failed_progress = currentIndex;
+            } else {
+                samData.summary_failed_progress = -1;
+            }
+            
             curr_state = STATES.IDLE; updateUIStatus();
         }
     }
 
-    async function processSummarizationRun(startIndex, endIndex, force = false) {
+    async function checkAndGenerateL3Summaries() {
+        const l3Set = samSettings.summary_levels.L3;
+        if (!l3Set.enabled) return;
+
+        while (samData.responseSummary.L2.length >= l3Set.frequency) {
+            const toCondense = samData.responseSummary.L2.slice(0, l3Set.frequency);
+            const l3Str = toCondense.map(s => `[Messages ${s.index_begin}-${s.index_end}]: ${s.content}`).join('\n');
+            const pL3 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt_L3, { summary_content: l3Str });
+            
+            if (typeof toastr !== 'undefined') toastr.info(`[SAM] 开始生成 L3 摘要...`);
+            try {
+                const resultL3 = (samSettings.summary_api_preset && apiManager) ? await apiManager.generate([{ role: 'user', content: pL3 }], samSettings.summary_api_preset)
+                                : await SillyTavern.getContext().generateQuietPrompt({ quietPrompt: pL3, skipWIAN: samSettings.skipWIAN_When_summarizing });
+                if (resultL3) {
+                    samData.responseSummary.L3.push({ index_begin: toCondense[0].index_begin, index_end: toCondense[toCondense.length-1].index_end, content: resultL3, level: 0 });
+                    samData.responseSummary.L2.splice(0, l3Set.frequency);
+                } else {
+                    break;
+                }
+            } catch(e) {
+                logger.error("L3 Summary failed", e);
+                break;
+            }
+        }
+    }
+
+    async function generateSingleL2Summary(startIndex, endIndex, force = false) {
         const chat = SillyTavern.getContext().chat;
         if (!samData.responseSummary) samData.responseSummary = { L1:[], L2:[], L3:[] };
 
-        if (force) { samData.responseSummary.L2 = samData.responseSummary.L2.filter(s => s.index_begin >= endIndex || s.index_end <= startIndex); }
+        if (force) { 
+            samData.responseSummary.L2 = samData.responseSummary.L2.filter(s => s.index_begin >= endIndex || s.index_end <= startIndex); 
+        }
 
         const msgs = chat.slice(startIndex, endIndex);
         if (msgs.length === 0) return false;
@@ -829,7 +872,7 @@ $((() => {
         const promptL2 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt, { db_content, chat_content: contentStr });
 
         let resultL2;
-        if (typeof toastr !== 'undefined') toastr.info("[SAM] 开始生成摘要...");
+        if (typeof toastr !== 'undefined') toastr.info(`[SAM] 开始生成摘要 (${startIndex}-${endIndex})...`);
         try {
             if (samSettings.summary_api_preset && apiManager) {
                 resultL2 = await apiManager.generate([{ role: 'user', content: promptL2 }], samSettings.summary_api_preset);
@@ -856,30 +899,39 @@ $((() => {
 
         if (cleanL2) {
             samData.responseSummary.L2.push({ index_begin: startIndex, index_end: endIndex, content: cleanL2, level: 0 });
-            samData.summary_progress = endIndex;
-
-            const l3Set = samSettings.summary_levels.L3;
-            if (l3Set.enabled && samData.responseSummary.L2.length >= l3Set.frequency) {
-                const toCondense = samData.responseSummary.L2.slice(-l3Set.frequency);
-                const l3Str = toCondense.map(s => `[Messages ${s.index_begin}-${s.index_end}]: ${s.content}`).join('\n');
-                const pL3 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt_L3, { summary_content: l3Str });
-                try {
-                    const resultL3 = (samSettings.summary_api_preset && apiManager) ? await apiManager.generate([{ role: 'user', content: pL3 }], samSettings.summary_api_preset)
-                                   : await SillyTavern.getContext().generateQuietPrompt({ quietPrompt: pL3, skipWIAN: samSettings.skipWIAN_When_summarizing });
-                    if (resultL3) {
-                        samData.responseSummary.L3.push({ index_begin: toCondense[0].index_begin, index_end: toCondense[toCondense.length-1].index_end, content: resultL3, level: 0 });
-                        samData.responseSummary.L2.splice(-l3Set.frequency);
-                    }
-                } catch(e) {}
-            }
-
-            if (sam_db.isInitialized) samData.jsondb = sam_db.export();
-            await applyDataToChat(samData);
-            if (typeof toastr !== 'undefined') toastr.success("[SAM] 摘要生成完成");
-            if (UI_STATE.panelOpen) renderTabContent();
             return true;
         }
         return false;
+    }
+
+    async function processBatchSummarizationRun(targetIndex, force = false) {
+        let last_progress = samData.summary_progress || 0;
+        const l2_freq = samSettings.summary_levels.L2.frequency;
+        let anySuccess = false;
+
+        while (targetIndex - last_progress >= l2_freq) {
+            const chunkEndIndex = last_progress + l2_freq;
+            logger.info(`Running L2 summary for chunk ${last_progress} - ${chunkEndIndex}`);
+            const success = await generateSingleL2Summary(last_progress, chunkEndIndex, force);
+            if (!success) {
+                logger.warn(`L2 summary failed at chunk ${last_progress} - ${chunkEndIndex}`);
+                toastr.error(`[SAM] 摘要生成失败 [${last_progress} - ${chunkEndIndex}]`);
+                break;
+            }
+            last_progress = chunkEndIndex;
+            samData.summary_progress = last_progress;
+            anySuccess = true;
+
+            await checkAndGenerateL3Summaries();
+        }
+        
+        if (anySuccess) {
+            if (sam_db.isInitialized) samData.jsondb = sam_db.export();
+            await applyDataToChat(samData);
+            if (typeof toastr !== 'undefined') toastr.success("[SAM] 批量摘要生成完成");
+            if (UI_STATE.panelOpen) renderTabContent();
+        }
+        return anySuccess;
     }
 
     async function processMessageState(index) {
@@ -1064,7 +1116,7 @@ $((() => {
     async function unifiedEventHandler(event, ...args) {
         // Yielding to main thread like in V5
         setTimeout(() => {
-            event_queue.push({ event_id: event, args: [...args] });
+            event_queue.push({ event_id: event, args:[...args] });
             unified_dispatch_executor();
         }, 0);
     }
@@ -1104,7 +1156,7 @@ $((() => {
         }
     }
 
-    function Ce(val, min, max, defaultVal) {
+    function clamp_max(val, min, max, defaultVal) {
         const o = Number(val);
         return Number.isFinite(o) ? Math.min(max, Math.max(min, o)) : defaultVal;
     }
@@ -1118,8 +1170,8 @@ $((() => {
         const maxLeft = Math.max(8, y.innerWidth - width - 8);
         const maxTop = Math.max(8, y.innerHeight - height - 8);
         
-        const safeLeft = Ce(leftTarget, 8, maxLeft, 8);
-        const safeTop = Ce(topTarget, 8, maxTop, 8);
+        const safeLeft = clamp_max(leftTarget, 8, maxLeft, 8);
+        const safeTop = clamp_max(topTarget, 8, maxTop, 8);
         
         k.widget.style.left = `${safeLeft}px`;
         k.widget.style.top = `${safeTop}px`;
@@ -1139,7 +1191,7 @@ $((() => {
           #${WIDGET_ID} { position: fixed; z-index: 99997; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
           #${WIDGET_ID} .th-asr-fab { width: 48px; height: 48px; border: none; border-radius: 14px; cursor: pointer; color: white; background: linear-gradient(135deg, #0f766e, #0f172a); box-shadow: 0 8px 20px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; touch-action: none; transition: transform 0.16s ease, box-shadow 0.16s ease; }
           #${WIDGET_ID} .th-asr-fab:hover { transform: translateY(-1px) scale(1.02); box-shadow: 0 10px 24px rgba(0,0,0,0.5); }
-          #${WIDGET_ID} .th-asr-panel { margin-top: 10px; width: 800px; max-height: 90vh; border-radius: 8px; background: #1e1e1e; border: 1px solid #333; box-shadow: 0 16px 36px rgba(0,0,0,0.6); display: flex; flex-direction: column; overflow: hidden; color: #ddd; }
+          #${WIDGET_ID} .th-asr-panel { margin-top: 10px; width: 95vw; height: 95vh; border-radius: 8px; background: #1e1e1e; border: 1px solid #333; box-shadow: 0 16px 36px rgba(0,0,0,0.6); display: flex; flex-direction: column; overflow: hidden; color: #ddd; }
           #${WIDGET_ID} .th-asr-panel[hidden] { display: none !important; }
           .sam_modal_header { background: #252526; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #333; user-select: none; touch-action: none; }
           .sam_header_title { font-weight: bold; font-size: 14px; } .sam_brand { color: #4a6fa5; } .sam_version { font-size: 10px; color: #666; }
@@ -1209,7 +1261,7 @@ $((() => {
               </div>
               <div class="sam_form_row"><label class="sam_label">L2 生成提示词</label><textarea class="sam_textarea" id="sam_prompt_L2">${samSettings.summary_prompt}</textarea></div>
               <div class="sam_form_row"><label class="sam_label">L3 生成提示词</label><textarea class="sam_textarea" id="sam_prompt_L3">${samSettings.summary_prompt_L3}</textarea></div>
-              <div class="sam_actions"><button class="sam_btn sam_btn_primary" id="btn_save_summary">保存配置</button> <button class="sam_btn sam_btn_secondary" id="btn_run_summary">立即执行一次总结</button></div>
+              <div class="sam_actions"><button class="sam_btn sam_btn_primary" id="btn_save_summary">保存配置</button> <button class="sam_btn sam_btn_secondary" id="btn_run_summary">一键批量总结</button></div>
               <hr style="border-color: #333; margin: 20px 0;">
               <h3>已存档摘要</h3>
               <div class="sam_summary_display">
@@ -1382,7 +1434,7 @@ $((() => {
                 if(!go_flag || !samSettings.data_enable) { toastr.warning("摘要功能未激活。"); return; }
                 const chatLen = SillyTavern.getContext().chat.length;
                 curr_state = STATES.SUMMARIZING; updateUIStatus();
-                await processSummarizationRun(Math.max(0, chatLen - samSettings.summary_levels.L2.frequency), chatLen, true);
+                await processBatchSummarizationRun(chatLen, false);
                 curr_state = STATES.IDLE; updateUIStatus();
             };
             C.querySelectorAll('.sam_summary_display .sam_delete_icon').forEach(icon => {
@@ -1565,7 +1617,7 @@ $((() => {
 
     function serialize_memory() {
     const data = sync_getVariables();
-    let allSummaries = [];
+    let allSummaries =[];
 
     // Combine L2 and L3 summaries, adding a 'level' property to each
     if (data.responseSummary && Array.isArray(data.responseSummary.L2)) {
@@ -1822,4 +1874,3 @@ $((() => {
     else { startup(); }
 
   })());
-// --- END OF FULLY INTEGRATED SAM V6 CODE ---
