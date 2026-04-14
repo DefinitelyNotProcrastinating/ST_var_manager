@@ -47,13 +47,11 @@ $((() => {
         func:[], events:[], event_counter: 0
     };
 
-    // [RESTORED FROM V5] FSM States
     const STATES = { IDLE: "IDLE", AWAIT_GENERATION: "AWAIT_GENERATION", PROCESSING: "PROCESSING", SUMMARIZING: "SUMMARIZING" };
     const SAM_FUNCTIONLIB_ID = "__SAM_IDENTIFIER__";
     const SAM_BASEDATA_ID = "__SAM_base_data__";
     const MODULE_NAME = 'sam_extension';
 
-    //[RESTORED FROM V5] Constant for the generation watcher
     const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
     const WATCHER_INTERVAL_MS = 3000;
 
@@ -296,8 +294,7 @@ $((() => {
             const orderedMessages = messages.map(m => ({ role: this._normalizeRole(m.role), content: m.content }));
 
             if (preset.apiMode === 'tavern') {
-                if (typeof TavernHelper === 'undefined' || typeof TavernHelper.generateRaw !== 'function') throw new Error('APIManager: TavernHelper.generateRaw not available.');
-                const response = await TavernHelper.generateRaw({ ordered_prompts: orderedMessages, should_stream: false }, abortSignal);
+                const response = await generateRaw({ ordered_prompts: orderedMessages, should_stream: false }, abortSignal);
                 if (typeof response === 'string') return response.trim();
                 throw new Error(`Main API did not return a valid text response.`);
             }
@@ -960,24 +957,41 @@ $((() => {
             //[RESTORED FROM V5] Immediately push updated variable memory
             await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newState)); return variables });
 
-            // [RESTORED FROM V5] Explicit cleanup to prevent duplicate blocks
-            let cleanNarrative = messageContent
-                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
-                .replace(CHECKPOINT_STRIP_REGEX, '')
-                .replace(OLD_STATE_REMOVE_REGEX, '')
-                .trim();
-
-            let appendedLogs = "";
+            // Build the new block HTML if needed
+            let newBlockHTML = "";
             if (generatedDiffs && generatedDiffs.length > 0) {
                 const updatedOps =[...opsFromMessage, ...generatedDiffs];
                 const newBlockContent = JSON.stringify(updatedOps, null, 2);
-                appendedLogs = `\n\n<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
+                newBlockHTML = `<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
             } else if (opsFromMessage.length > 0) {
                 const newBlockContent = JSON.stringify(opsFromMessage, null, 2);
-                appendedLogs = `\n\n<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
+                newBlockHTML = `<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
             }
-            
-            cleanNarrative += appendedLogs;
+
+            // [RESTORED FROM V5] Explicit cleanup to prevent duplicate blocks
+            // Preserve the original location of the JSONPatch block
+            let cleanNarrative = messageContent
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '');
+
+            let patchReplaced = false;
+            if (newBlockHTML !== "") {
+                if (cleanNarrative.match(UPDATE_BLOCK_REMOVE_REGEX)) {
+                    cleanNarrative = cleanNarrative.replace(UPDATE_BLOCK_REMOVE_REGEX, (match) => {
+                        if (!patchReplaced) {
+                            patchReplaced = true;
+                            return newBlockHTML;
+                        }
+                        return ''; // Remove subsequent blocks
+                    });
+                } else {
+                    cleanNarrative = cleanNarrative.trim() + `\n\n${newBlockHTML}`;
+                }
+            } else {
+                cleanNarrative = cleanNarrative.replace(UPDATE_BLOCK_REMOVE_REGEX, '');
+            }
+
+            cleanNarrative = cleanNarrative.trim();
 
             const currentRound = chat.filter(m => !m.is_user).length;
             const shouldCheckpoint = samSettings.enable_auto_checkpoint &&
@@ -990,7 +1004,7 @@ $((() => {
             }
 
             chat[index].mes = cleanNarrative;
-            await TavernHelper.setChatMessages([{ message_id: index, message: cleanNarrative }]);
+            await setChatMessages([{ message_id: index, message: cleanNarrative }]);
 
             await applyDataToChat(samData);
         } catch (error) {
@@ -1009,7 +1023,7 @@ $((() => {
     }
 
     // ========================================================================
-    // [RESTORED FROM V5] FSM Dispatcher & Event Handling
+    // FSM Dispatcher & Event Handling
     // ========================================================================
 
     async function dispatcher(event, ...args) {
@@ -1260,9 +1274,23 @@ $((() => {
                   <div class="sam_toggle" id="toggle_L3"><div class="sam_toggle_track ${samSettings.summary_levels.L3.enabled?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
               </div>
               <div class="sam_form_row"><label class="sam_label">L2 生成提示词</label><textarea class="sam_textarea" id="sam_prompt_L2">${samSettings.summary_prompt}</textarea></div>
+              
+              
               <div class="sam_form_row"><label class="sam_label">L3 生成提示词</label><textarea class="sam_textarea" id="sam_prompt_L3">${samSettings.summary_prompt_L3}</textarea></div>
-              <div class="sam_actions"><button class="sam_btn sam_btn_primary" id="btn_save_summary">保存配置</button> <button class="sam_btn sam_btn_secondary" id="btn_run_summary">一键批量总结</button></div>
+              
+              <div class="sam_actions">
+                  <button class="sam_btn sam_btn_primary" id="btn_save_summary">保存配置</button> 
+                  <button class="sam_btn sam_btn_secondary" id="btn_run_summary">一键批量总结</button>
+                  <button class="sam_btn sam_btn_secondary" id="btn_show_summary_prompt">查看下次提示词 (Debug)</button>
+              </div>
+              <div id="debug_prompt_container" style="display:none; margin-top:15px; background:#1a1a1a; padding:10px; border:1px dashed #555; border-radius:4px;">
+                  <label class="sam_label" style="color:#f0ad4e;">下次 L2 摘要提示词预览 (范围: <span id="debug_prompt_range"></span>)</label>
+                  <textarea class="sam_textarea" id="debug_prompt_area" readonly style="min-height:200px; background:#111; color:#ccc; margin-top:5px;"></textarea>
+              </div>
+
               <hr style="border-color: #333; margin: 20px 0;">
+
+
               <h3>已存档摘要</h3>
               <div class="sam_summary_display">
                   ${['L3', 'L2', 'L1'].map(level => `
@@ -1436,6 +1464,58 @@ $((() => {
                 curr_state = STATES.SUMMARIZING; updateUIStatus();
                 await processBatchSummarizationRun(chatLen, false);
                 curr_state = STATES.IDLE; updateUIStatus();
+            };
+            C.querySelector('#btn_show_summary_prompt').onclick = () => {
+                if(!go_flag || !samSettings.data_enable) { toastr.warning("摘要功能未激活。"); return; }
+                
+                const container = C.querySelector('#debug_prompt_container');
+                const area = C.querySelector('#debug_prompt_area');
+                const rangeSpan = C.querySelector('#debug_prompt_range');
+                
+                // 如果已经打开，则折叠关闭
+                if (container.style.display === 'block') {
+                    container.style.display = 'none';
+                    return;
+                }
+
+                // 模拟 generateSingleL2Summary 的取值逻辑
+                const chat = SillyTavern.getContext().chat;
+                const startIndex = samData.summary_progress || 0;
+                let endIndex = startIndex + samSettings.summary_levels.L2.frequency;
+                
+                rangeSpan.textContent = `${startIndex} - ${endIndex}`;
+
+                if (startIndex >= chat.length) {
+                    area.value = "没有待处理的摘要内容 (No pending content for summary).";
+                } else {
+                    const msgs = chat.slice(startIndex, endIndex);
+                    if (msgs.length === 0) {
+                        area.value = "待处理消息为空 (Pending messages empty).";
+                    } else {
+                        // 执行相同的消息清理过程
+                        const contentStr = msgs.map(m => {
+                            let processed = m.mes
+                                .replace(CHECKPOINT_STRIP_REGEX, '')
+                                .replace(OLD_STATE_REMOVE_REGEX, '')
+                                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
+                                .trim();
+                            samSettings.regexes.forEach(rx => { 
+                                if(rx.enabled && rx.regex_body) {
+                                    try { processed = processed.replace(new RegExp(rx.regex_body, 'g'), ''); } catch(e){} 
+                                }
+                            });
+                            return `${m.name}: ${processed}`;
+                        }).join('\n');
+
+                        // 获取数据库映射并注入宏
+                        const db_content = sam_db && sam_db.isInitialized ? Object.entries(sam_db.getAllMemosAsObject()).map(([k,v])=>`Key: ${k}\nContent: ${v}`).join('\n\n') : "无现有设定";
+                        const promptL2 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt, { db_content, chat_content: contentStr });
+                        
+                        area.value = promptL2;
+                    }
+                }
+                
+                container.style.display = 'block';
             };
             C.querySelectorAll('.sam_summary_display .sam_delete_icon').forEach(icon => {
                 icon.onclick = (e) => { const {level, idx} = e.target.dataset; samData.responseSummary[level].splice(idx, 1); renderTabContent(); };
@@ -1811,7 +1891,7 @@ $((() => {
             const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
 
             chat[lastAiIndex].mes = finalContent;
-            await TavernHelper.setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
+            await setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
             toastr.success("手动检查点已创建 (Manual checkpoint created)");
         } catch(e) {
             logger.error("Manual checkpoint failed", e);
