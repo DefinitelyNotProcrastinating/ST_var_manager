@@ -53,6 +53,7 @@ $((() => {
     const MODULE_NAME = 'sam_extension';
 
     const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
+    const SAM_RESPONSE_PROCESSING_COMPLETED = 'SAM_RESPONSE_PROCESSING_COMPLETED';
     const WATCHER_INTERVAL_MS = 3000;
 
     // API Sources Constants
@@ -593,6 +594,13 @@ $((() => {
                     let pathStr = op.path !== undefined ? op.path : op.from;
                     if (typeof pathStr === 'string') {
                         const pathKeys = parseJsonPointer(pathStr);
+
+                        // skip readonly vars
+                        if (pathKeys.length > 0 && pathKeys[0].startsWith('_')) {
+                            logger.warn(`Skipping operation on read-only variable: ${pathStr}`);
+                            continue;
+                        }
+
                         let currentVal = _.get(state.static, pathKeys);
 
                         switch(op.op) {
@@ -1007,6 +1015,9 @@ $((() => {
             await setChatMessages([{ message_id: index, message: cleanNarrative }]);
 
             await applyDataToChat(samData);
+
+            eventEmit(SAM_RESPONSE_PROCESSING_COMPLETED);
+
         } catch (error) {
             logger.error("Error in processMessageState:", error);
         } finally {
@@ -1016,10 +1027,13 @@ $((() => {
 
     async function applyDataToChat(data) {
         await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(data)); return variables });
+        
         await setChatMessages([{"message_id": SillyTavern.getContext().chat.length - 1},
             {"message_id": SillyTavern.getContext().chat.length - 2}
             ]
         );
+
+
     }
 
     // ========================================================================
