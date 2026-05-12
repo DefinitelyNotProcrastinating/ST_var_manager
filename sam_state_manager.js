@@ -1,271 +1,109 @@
-// ============================================================================
-// == Situational Awareness Manager
-// == Version: 3.5.0 "Momentum"
-// ==
-// == This script provides a robust state management system for SillyTavern.
-// == It correctly maintains a nested state object and passes it to the UI
-// == functions, ensuring proper variable display and structure.
-// == It correctly handles state during swipes and regenerations by using
-// == the GENERATION_STARTED event to prepare the state, fixing race conditions.
-// == It also includes a sandboxed EVAL command for user-defined functions,
-// == now with support for execution ordering and periodic execution.
-// == It now features a comprehensive logging system and recovery tools.
-// == [NEW in 3.5.0] Major performance overhaul: Asynchronous, non-blocking
-// == processing to eliminate UI stuttering on low-power devices.
-// == [NEW in 3.4.0] Adds a structured, stateful event tracking system to manage
-// == multi-turn narrative arcs with commands like EVENT_BEGIN and EVENT_END.
-// == [NEW in 3.3.0] Adds support for a __SAM_base_data__ World Info entry,
-// == allowing a base state to be loaded and merged on the first turn.
-// ============================================================================
-// ****************************
-// Required plugins: JS-slash-runner by n0vi028
-// ****************************
+$((() => {
+    "use strict";
 
-// Plug and play command reference, paste into prompt:
-/*
-command_syntax:
-  - command: TIME
-    description: Updates the time progression.
-    syntax: '@.TIME("new_datetime_string");'
-    parameters:
-      - name: new_datetime_string
-        type: string
-        description: A string that can be parsed as a Date (e.g., "2024-07-29T10:30:00Z").
-  - command: SET
-    description: Sets a variable at a specified path to a given value.
-    syntax: '@.SET("path.to.var", value);'
-    parameters:
-      - name: path.to.var
-        type: string
-        description: The dot-notation path to the variable in the state object.
-      - name: value
-        type: any
-        description: The new value to assign. Can be a string, number, boolean, null, or a JSON object/array.
-  - command: ADD
-    description: Adds a value. If the target is a number, it performs numeric addition. If the target is a list (array), it appends the value.
-    syntax: '@.ADD("path.to.var", value_to_add);'
-    parameters:
-      - name: path.to.var
-        type: string
-        description: The path to the numeric variable or list.
-      - name: value_to_add
-        type: number | any
-        description: The number to add or the item to append to the list.
-  - command: DEL
-    description: Deletes an item from a list by its numerical index. The item is removed, and the list is compacted.
-    syntax: '@.DEL("path.to.list", index);'
-    parameters:
-      - name: path.to.list
-        type: string
-        description: The path to the list.
-      - name: index
-        type: integer
-        description: The zero-based index of the item to delete.
-  - command: SELECT_SET
-    description: Finds a specific object within a list and sets a property on that object to a new value.
-    syntax: '@.SELECT_SET("path.to.list", "selector_key", "selector_value", "receiver_key", new_value);'
-    parameters:
-      - name: path.to.list
-        type: string
-        description: The path to the list of objects.
-      - name: selector_key
-        type: string
-        description: The property name to search for in each object.
-      - name: selector_value
-        type: any
-        description: The value to match to find the correct object.
-      - name: receiver_key
-        type: string
-        description: The property name on the found object to update.
-      - name: new_value
-        type: any
-        description: The new value to set.
-  - command: SELECT_ADD
-    description: Finds a specific object within a list and adds a value to one of its properties.
-    syntax: '@.SELECT_ADD("path.to.list", "selector_key", "selector_value", "receiver_key", value_to_add);'
-    parameters:
-      - name: path.to.list
-        type: string
-        description: The path to the list of objects.
-      - name: selector_key
-        type: string
-        description: The property name to search for in each object.
-      - name: selector_value
-        type: any
-        description: The value to match to find the correct object.
-      - name: receiver_key
-        type: string
-        description: The property on the found object to add to (must be a number or a list).
-      - name: value_to_add
-        type: any
-        description: The value to add or append.
-  - command: SELECT_DEL
-    description: Finds and completely deletes an object from a list based on a key-value match.
-    syntax: '@.SELECT_DEL("path.to.list", "selector_key", "selector_value");'
-    parameters:
-      - name: path.to.list
-        type: string
-        description: The path to the list of objects.
-      - name: selector_key
-        type: string
-        description: The property name to search for in each object.
-      - name: selector_value
-        type: any
-        description: The value to match to identify the object for deletion.
-  - command: TIMED_SET
-    description: Schedules a variable to be set to a new value in the future, either based on real-world time or in-game rounds.
-    syntax: '@.TIMED_SET("path.to.var", new_value, "reason", is_real_time, timepoint);'
-    parameters:
-      - name: path.to.var
-        type: string
-        description: The dot-notation path to the variable to set.
-      - name: new_value
-        type: any
-        description: The value to set the variable to when the time comes.
-      - name: reason
-        type: string
-        description: A unique identifier for this scheduled event, used for cancellation.
-      - name: is_real_time
-        type: boolean
-        description: If true, `timepoint` is a date string. If false, `timepoint` is a number of rounds from now.
-      - name: timepoint
-        type: string | integer
-        description: The target time. A date string like "2024-10-26T10:00:00Z" if `is_real_time` is true, or a number of rounds (e.g., 5) if false.
-  - command: CANCEL_SET
-    description: Cancels a previously scheduled TIMED_SET command.
-    syntax: '@.CANCEL_SET("identifier");'
-    parameters:
-      - name: identifier
-        type: string | integer
-        description: The `reason` string or the numerical index of the scheduled event in the `state.volatile` array to cancel.
-  - command: RESPONSE_SUMMARY
-    description: Adds a text summary of the current response to the special `state.responseSummary` list.
-    syntax: '@.RESPONSE_SUMMARY("summary_text");'
-    parameters:
-      - name: summary_text
-        type: string
-        description: A concise summary of the AI's response.
-  - command: EVENT_BEGIN
-    description: Starts a new narrative event. Fails if another event is already active.
-    syntax: '@.EVENT_BEGIN("name", "objective", "optional_first_step", ...);'
-    parameters:
-      - name: name
-        type: string
-        description: The name of the event (e.g., "The Council of Elrond").
-      - name: objective
-        type: string
-        description: The goal of the event (e.g., "Decide the fate of the One Ring").
-      - name: '...'
-        type: string
-        description: Optional. One or more strings to add as the first procedural step(s) of the event.
-  - command: EVENT_END
-    description: Concludes the currently active event, setting its status and end time.
-    syntax: '@.EVENT_END(exitCode, "optional_summary");'
-    parameters:
-      - name: exitCode
-        type: integer
-        description: The status code for the event's conclusion (1=success, -1=aborted/failed, other numbers for custom states).
-      - name: optional_summary
-        type: string
-        description: Optional. A final summary of the event's outcome.
-  - command: EVENT_ADD_PROC
-    description: Adds one or more procedural steps to the active event's log.
-    syntax: '@.EVENT_ADD_PROC("step_description_1", "step_description_2", ...);'
-    parameters:
-      - name: '...'
-        type: string
-        description: One or more strings detailing what just happened in the event.
-  - command: EVENT_ADD_DEFN
-    description: Adds a temporary, event-specific definition (like a new item or concept) to the active event.
-    syntax: '@.EVENT_ADD_DEFN("item_name", "item_description");'
-    parameters:
-      - name: item_name
-        type: string
-        description: The name of the new concept (e.g., "Shard of Narsil").
-      - name: item_description
-        type: string
-        description: A brief description of the concept.
-  - command: EVENT_ADD_MEMBER
-    description: Adds one or more members to the list of participants in the active event.
-    syntax: '@.EVENT_ADD_MEMBER("name_1", "name_2", ...);'
-    parameters:
-      - name: '...'
-        type: string
-        description: The names of the characters or entities involved in the event.
-  - command: EVENT_SUMMARY
-    description: Sets or updates the summary for the active event. This can be done before the event ends.
-    syntax: '@.EVENT_SUMMARY("summary_text");'
-    parameters:
-      - name: summary_text
-        type: string
-        description: The summary content.
-  - command: EVAL
-    description: Executes a user-defined function stored in `state.func`. DANGEROUS - use with caution.
-    syntax: '@.EVAL("function_name", param1, param2, ...);'
-    parameters:
-      - name: function_name
-        type: string
-        description: The `func_name` of the function object to execute from the `state.func` array.
-      - name: '...'
-        type: any
-        description: Optional, comma-separated parameters to pass to the function.
-*/
+    // ========================================================================
+    // 1. 基础配置与标识常量 (Base Configuration & Constants)
+    // ========================================================================
+    const INSTANCE_KEY = "__sam_core_widget_v6__";
+    const STYLE_ID = "sam-core-widget-style";
+    const WIDGET_ID = "sam-core-widget-root";
+    const APP_NAME = "SAM 核心管理器";
 
-// ------------------------------------------------------------------------------------------- 
+    const SCRIPT_VERSION = "6.2.11 'Lone star'"; 
+    const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
+    const MINISEARCH_URL = "https://cdn.jsdelivr.net/npm/minisearch@6.3.0/dist/umd/index.min.js";
 
-(function () {
-    // --- CONFIGURATION ---
-    const SCRIPT_NAME = "Situational Awareness Manager";
-    const STATE_BLOCK_START_MARKER = '<!--<|state|>';
-    const STATE_BLOCK_END_MARKER = '</|state|>-->';
-    const STATE_BLOCK_PARSE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*?)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
-    const STATE_BLOCK_REMOVE_REGEX = new RegExp(`${STATE_BLOCK_START_MARKER.replace(/\|/g, '\\|')}([\\s\\S]*)${STATE_BLOCK_END_MARKER.replace(/\|/g, '\\|')}`, 's');
-    const COMMAND_REGEX = /^\s*@\.(SET|ADD|DEL|SELECT_ADD|DICT_DEL|SELECT_DEL|SELECT_SET|TIME|TIMED_SET|RESPONSE_SUMMARY|CANCEL_SET|EVENT_BEGIN|EVENT_END|EVENT_ADD_PROC|EVENT_ADD_DEFN|EVENT_ADD_MEMBER|EVENT_SUMMARY|EVAL)\b\s*\((.*)\)\s*;?\s*$/gim;
-    const INITIAL_STATE = { static: {}, time: "", volatile: [], responseSummary: [], func: [], events: [], event_counter: 0 };
+    //[RESTORED FROM V5] Key for cleaning up old instances on script reload
+    const HANDLER_STORAGE_KEY = `__SAM_V6_EVENT_HANDLER_STORAGE__`;
 
-    // 🔧 手机端性能优化：检测设备类型并自动调整参数
+    // Local module references to replace global window dependencies
+    let local_jsonrepair = null;
+    let local_MiniSearch = null;
+
+    // Regex to find and extract content from <JSONPatch> blocks.
+    const UPDATE_BLOCK_EXTRACT_REGEX = /<JSONPatch>([\s\S]*?)<\/JSONPatch>/gim;
+    const UPDATE_BLOCK_REMOVE_REGEX = /<JSONPatch>[\s\S]*?<\/JSONPatch>/gim;
+
+    // Legacy & New Checkpoint Block Regexes (Restored Functionality)
+    const OLD_START_MARKER = '$$$$$$data_block$$$$$$';
+    const OLD_END_MARKER = '$$$$$$data_block_end$$$$$$';
+    const OLD_STATE_PARSE_REGEX = new RegExp(`${OLD_START_MARKER.replace(/\$/g, '\\$')}\\s*([\\s\\S]*?)\\s*${OLD_END_MARKER.replace(/\$/g, '\\$')}`, 's');
+    const OLD_STATE_REMOVE_REGEX = new RegExp(`${OLD_START_MARKER.replace(/\$/g, '\\$')}[\\s\\S]*?${OLD_END_MARKER.replace(/\$/g, '\\$')}`, 'sg');
+
+    // Kept solely for backwards compatibility with any existing V6 blocks in chat history
+    const CHECKPOINT_REGEX = /<SAMCheckpoint>([\s\S]*?)<\/SAMCheckpoint>/s;
+    const CHECKPOINT_STRIP_REGEX = /(?:<!-- SAM_CHECKPOINT -->\s*)?<SAMCheckpoint>[\s\S]*?<\/SAMCheckpoint>/sg;
+
+    // Thread Yielding for Mobile (Restored Functionality)
     const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-    const DELAY_MS = isMobileDevice ? 10 : 5; // 手机端使用更长延迟
-    const COMMAND_BATCH_SIZE = isMobileDevice ? 3 : 5; // 手机端使用更小批次
-    const REGEX_MATCH_INTERVAL = isMobileDevice ? 2 : 3; // 手机端更频繁释放主线程
+    const DELAY_MS = isMobileDevice ? 10 : 5;
 
-    // --- STATE & LIFECYCLE MANAGEMENT ---
-    let isProcessingState = false;
-    let isDispatching = false;
-    const event_queue = [];
-    const executionLog = [];
-    let generationWatcherId = null;
-
-    const STATES = { IDLE: "IDLE", AWAIT_GENERATION: "AWAIT_GENERATION", PROCESSING: "PROCESSING" };
-    var curr_state = STATES.IDLE;
-    const WATCHER_INTERVAL_MS = 3000;
-    const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
-    const HANDLER_STORAGE_KEY = `__SAM_V3_EVENT_HANDLER_STORAGE__`;
-    const SESSION_STORAGE_KEY = "__SAM_ID__";
-    var session_id = "";
-
-    const logger = {
-        info: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
-            executionLog.push({ level: 'INFO', timestamp: new Date().toISOString(), message });
-            console.log(`[${SCRIPT_NAME}]`, ...args);
-        },
-        warn: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
-            executionLog.push({ level: 'WARN', timestamp: new Date().toISOString(), message });
-            console.warn(`[${SCRIPT_NAME}]`, ...args);
-        },
-        error: (...args) => {
-            const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' ');
-            executionLog.push({ level: 'ERROR', timestamp: new Date().toISOString(), message });
-            console.error(`[${SCRIPT_NAME}]`, ...args);
-        }
+    const INITIAL_STATE = {
+        static: {}, time: "", dtime: 0, volatile:[],
+        responseSummary: { L1:[], L2:[], L3:[] },
+        summary_progress: 0,
+        summary_failed_progress: -1,
+        jsondb: null,
+        func:[], events:[], event_counter: 0
     };
 
+    const STATES = { IDLE: "IDLE", AWAIT_GENERATION: "AWAIT_GENERATION", PROCESSING: "PROCESSING", SUMMARIZING: "SUMMARIZING" };
+    const SAM_FUNCTIONLIB_ID = "__SAM_IDENTIFIER__";
+    const SAM_BASEDATA_ID = "__SAM_base_data__";
+    const MODULE_NAME = 'sam_extension';
+
+    const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
+    const SAM_RESPONSE_PROCESSING_COMPLETED = 'SAM_RESPONSE_PROCESSING_COMPLETED';
+    const WATCHER_INTERVAL_MS = 3000;
+
+    // API Sources Constants
+    const API_SOURCES = {
+        OPENAI: 'openai', CLAUDE: 'claude', OPENROUTER: 'openrouter', AI21: 'ai21', MAKERSUITE: 'makersuite',
+        VERTEXAI: 'vertexai', MISTRALAI: 'mistralai', CUSTOM: 'custom', COHERE: 'cohere', PERPLEXITY: 'perplexity',
+        GROQ: 'groq', ZEROONEAI: '01ai', NANOGPT: 'nanogpt', DEEPSEEK: 'deepseek', AIMLAPI: 'aimlapi', XAI: 'xai', POLLINATIONS: 'pollinations',
+    };
+    const API_SOURCE_OPTIONS =[
+        { value: 'custom', label: '自定义 / OpenAI 兼容' }, { value: 'makersuite', label: 'Google Makersuite (Gemini)' },
+        { value: 'claude', label: 'Anthropic Claude' }, { value: 'mistralai', label: 'Mistral AI' },
+        { value: 'openrouter', label: 'OpenRouter' }, { value: 'cohere', label: 'Cohere' },
+        { value: 'perplexity', label: 'Perplexity' }, { value: 'groq', label: 'Groq' },
+        { value: 'deepseek', label: 'DeepSeek' }, { value: '01ai', label: '01.AI' },
+        { value: 'nanogpt', label: 'NanoGPT' }, { value: 'aimlapi', label: 'AI/ML API' },
+        { value: 'xai', label: 'xAI (Grok)' }, { value: 'pollinations', label: 'Pollinations' },
+        { value: 'vertexai', label: 'Google Vertex AI' }, { value: 'ai21', label: 'AI21' },
+    ];
+
+    // Default Settings
+    const DEFAULT_SETTINGS = {
+        data_enable: true,
+        enable_auto_checkpoint: true,
+        auto_checkpoint_frequency: 20,
+        summary_api_preset: null,
+        api_presets:[],
+        summary_levels: {
+            L1: { enabled: false, frequency: 20 },
+            L2: { enabled: true, frequency: 20 },
+            L3: { enabled: true, frequency: 5 }
+        },
+        skipWIAN_When_summarizing: false,
+        regexes:[],
+        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用我们扩展的 JSON Patch 格式，并包裹在 <JSONPatch> 标签内。支持的op包含: replace, remove, delta, insert, inc, mul, push, addToSet, pull, pop, min, max, move。例如:\n<JSONPatch>\n[\n  { "op": "delta", "path": "/gold", "value": 10 }\n]\n</JSONPatch>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <JSONPatch> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
+        summary_prompt_L3: `You are a summarization expert. Review the following list of sequential event summaries (L2 summaries). Your task is to condense them into a single, high-level narrative paragraph (an L3 summary). Focus on the most significant developments.\n\n---\n**Summaries to Condense:**\n{{summary_content}}\n---`
+    };
+
+    // ========================================================================
+    // 2. 环境解析与全局实例清理
+    // ========================================================================
+    const y = (function () { try { if (window.top && window.top.document) return window.top; } catch (err) {} return window; })();
+    const v = (function (contextWindow) { try { if (contextWindow && contextWindow.document) return contextWindow.document; } catch (err) {} return document; })(y);
+
+    // UI 内部状态引用声明
+    const k = { widget: null, panel: null, fab: null, header: null, contentArea: null, statusText: null, depsText: null };
+
+    // [RESTORED FROM V5] Cleanup function for hot-reloading context
     const cleanupPreviousInstance = () => {
         const oldHandlers = window[HANDLER_STORAGE_KEY];
-        if (!oldHandlers) { logger.info("No previous instance found. Starting fresh."); return; }
-        logger.info("Found a previous instance. Removing its event listeners to prevent duplicates.");
+        if (!oldHandlers) { return; }
         eventRemoveListener(tavern_events.GENERATION_STARTED, oldHandlers.handleGenerationStarted);
         eventRemoveListener(tavern_events.GENERATION_ENDED, oldHandlers.handleGenerationEnded);
         eventRemoveListener(tavern_events.MESSAGE_SWIPED, oldHandlers.handleMessageSwiped);
@@ -275,879 +113,1858 @@ command_syntax:
         eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
         eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
         delete window[HANDLER_STORAGE_KEY];
+        console.log(`[${APP_NAME}] Cleaned up previous instance event listeners.`);
     };
 
-    // --- HELPER FUNCTIONS ---
+    function cleanupDOM() {
+        try {
+            const w = v.getElementById(WIDGET_ID); if (w) w.remove();
+            const s = v.getElementById(STYLE_ID); if (s) s.remove();
+            const wd = v.getElementById("sam-watchdog-script"); if (wd) wd.remove();
+            k.widget = null; k.panel = null; k.fab = null; k.header = null; k.contentArea = null; k.statusText = null; k.depsText = null;
+        } catch(e) {}
+    }
+
+    if (window[INSTANCE_KEY] && "function" == typeof window[INSTANCE_KEY].stop) {
+      try { window[INSTANCE_KEY].stop(); } catch (err) {}
+    }
+    cleanupDOM();
+
+    // ========================================================================
+    // 3. 统一全局状态
+    // ========================================================================
+    const cleanup_pool =[]; // 事件清理池
+    const _loadingLibraries = {};
+    const logger = {
+        info: (...args) => console.log(`[${APP_NAME}]`, ...args),
+        warn: (...args) => console.warn(`[${APP_NAME}]`, ...args),
+        error: (...args) => console.error(`[${APP_NAME}]`, ...args),
+        shoutInfo: (...args) => toastr.info(`[${APP_NAME}]`, ...args),
+        shoutError: (...args) => toastr.error(`[${APP_NAME}]`, ...args)
+    };
+
+    // [RESTORED FROM V5] State variables including explicit lock and explicit cache
+    let curr_state = STATES.IDLE;
+    const event_queue =[];
+    let isDispatching = false;
+    let isProcessingState = false; 
+    let isCheckpointing = false;
+    let prevState = null; 
+    let generationWatcherId = null; 
+    let current_run_is_dry = false;
+    let go_flag = false;
+
+    // --- 数据与UI状态 ---
+    let samSettings = structuredClone(DEFAULT_SETTINGS);
+    let samData = goodCopy(INITIAL_STATE);
+    let samFunctions =[];
+
+    let sam_db = null;
+    let apiManager = null;
+
+    let UI_STATE = {
+        panelOpen: false, uiLeft: null, uiTop: null, fabSizePx: 48,
+        activeTab: 'SUMMARY',
+        selectedFuncIndex: -1,
+        selectedPresetIndex: -1,
+        selectedRegexIndex: -1
+    };
+
+    window[INSTANCE_KEY] = {
+        stop: function () {
+            for (; cleanup_pool.length;) {
+                const cb = cleanup_pool.pop();
+                try { cb(); } catch(e){}
+            }
+            cleanupDOM();
+        }
+    };
+
+    async function chunkedStringify(obj) {
+        return new Promise((resolve) => {
+            setTimeout(() => { resolve(JSON.stringify(obj, null, 2)); }, DELAY_MS);
+        });
+    }
+
+    // ========================================================================
+    // 4. SAMDatabase 类封装 (No changes needed)
+    // ========================================================================
+    class SAMDatabase {
+        constructor({ enabled = true } = {}) {
+            this.isEnabled = enabled;
+            this.miniSearch = null;
+            this.documentMap = new Map();
+            this.isInitialized = false;
+            this.miniSearchConfig = { fields:['key', 'keywords'], storeFields: ['key'], idField: 'key' };
+        }
+        async init() {
+            if (!this.isEnabled || this.isInitialized) return this.isInitialized;
+            try {
+                if (!local_MiniSearch) await loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
+                if (local_MiniSearch) {
+                    this.miniSearch = new local_MiniSearch(this.miniSearchConfig);
+                    this.isInitialized = true;
+                    return true;
+                } else {
+                    logger.warn("DB init skipped: MiniSearch library not available.");
+                    this.isEnabled = false;
+                    return false;
+                }
+            } catch (error) { logger.warn("DB init failed.", error); this.isEnabled = false; return false; }
+        }
+        _checkReady() { return this.isEnabled && this.isInitialized; }
+        setMemo(key, content, keywords =[]) {
+            if (!this._checkReady()) return;
+            const doc = { key: key, keywords:[key, ...keywords].join(' ').toLowerCase() };
+            if (this.miniSearch.has(key)) this.miniSearch.remove({ key });
+            this.miniSearch.add(doc);
+            this.documentMap.set(key, content);
+        }
+        searchMemos(query) {
+            if (!this._checkReady()) return[];
+            return this.miniSearch.search(query.toLowerCase()).map(res => ({ key: res.key, content: this.documentMap.get(res.key) }));
+        }
+        deleteMemo(key) {
+            if (!this._checkReady()) return;
+            if (this.miniSearch.has(key)) { this.miniSearch.remove({ key }); this.documentMap.delete(key); }
+        }
+        getAllMemosAsObject() {
+            if (!this._checkReady()) return {};
+            return Object.fromEntries(this.documentMap.entries());
+        }
+        export() {
+            if (!this._checkReady()) return null;
+            return JSON.stringify({ miniSearchIndex: this.miniSearch.toJSON(), documentMap: Object.fromEntries(this.documentMap.entries()) });
+        }
+        import(jsonString) {
+            if (!this.isEnabled) return false;
+            try {
+                const data = JSON.parse(jsonString);
+                if (!local_MiniSearch || typeof local_MiniSearch.loadJSON !== 'function') throw new Error("MiniSearch not fully loaded.");
+                this.miniSearch = local_MiniSearch.loadJSON(JSON.stringify(data.miniSearchIndex), this.miniSearchConfig);
+                this.documentMap = new Map(Object.entries(data.documentMap));
+                this.isInitialized = true;
+                return true;
+            } catch (error) { logger.warn("DB import failed.", error); return false; }
+        }
+    }
+
+    // ========================================================================
+    // 5. APIManager 类封装 (No changes needed)
+    // ========================================================================
+    class APIManager {
+        constructor({ initialPresets =[], onUpdate = () => {} }) {
+            this.presets = initialPresets;
+            this.onUpdate = onUpdate;
+        }
+        _notifyUpdate() { if (typeof this.onUpdate === 'function') this.onUpdate(this.presets); }
+        savePreset(name, config) {
+            const trimmedName = name.trim();
+            const presetData = {
+                name: trimmedName, apiMode: config.apiMode === 'tavern' ? 'tavern' : 'custom',
+                apiConfig: {
+                    source: config.apiConfig?.source || API_SOURCES.CUSTOM,
+                    url: config.apiConfig?.url || '', apiKey: config.apiConfig?.apiKey || '',
+                    proxyPassword: config.apiConfig?.proxyPassword || '', model: config.apiConfig?.model || '',
+                    max_tokens: parseInt(config.apiConfig?.max_tokens || 4096, 10),
+                    temperature: parseFloat(config.apiConfig?.temperature || 0.9), top_p: parseFloat(config.apiConfig?.top_p || 0.9),
+                    frequency_penalty: parseFloat(config.apiConfig?.frequency_penalty || 0.0), presence_penalty: parseFloat(config.apiConfig?.presence_penalty || 0.0),
+                }
+            };
+            const existingIndex = this.presets.findIndex(p => p.name === trimmedName);
+            if (existingIndex >= 0) this.presets[existingIndex] = presetData; else this.presets.push(presetData);
+            this._notifyUpdate(); return true;
+        }
+        deletePreset(name) {
+            const initLen = this.presets.length;
+            this.presets = this.presets.filter(p => p.name !== name);
+            if (this.presets.length !== initLen) { this._notifyUpdate(); return true; }
+            return false;
+        }
+        getPreset(name) { return this.presets.find(p => p.name === name); }
+        getAllPresets() { return this.presets; }
+        _normalizeRole(role) {
+            const r = String(role || '').toLowerCase();
+            if (r === 'ai' || r === 'assistant') return 'assistant';
+            if (r === 'system') return 'system';
+            return 'user';
+        }
+        async generate(messages, presetName, abortSignal = null) {
+            const preset = this.getPreset(presetName);
+            if (!preset) throw new Error(`APIManager: Preset "${presetName}" not found.`);
+            const orderedMessages = messages.map(m => ({ role: this._normalizeRole(m.role), content: m.content }));
+
+            if (preset.apiMode === 'tavern') {
+                const response = await generateRaw({ ordered_prompts: orderedMessages, should_stream: false }, abortSignal);
+                if (typeof response === 'string') return response.trim();
+                throw new Error(`Main API did not return a valid text response.`);
+            }
+
+            if (preset.apiMode === 'custom') {
+                const apiConfig = preset.apiConfig || {};
+                if (!apiConfig.model) throw new Error(`APIManager: Model name is required for custom preset.`);
+                const cleanUrl = apiConfig.url ? apiConfig.url.replace(/\/$/, '') : '';
+                const source = apiConfig.source || API_SOURCES.CUSTOM;
+
+                let requestBody = {
+                    messages: orderedMessages, model: apiConfig.model, max_tokens: apiConfig.max_tokens,
+                    temperature: apiConfig.temperature, top_p: apiConfig.top_p, stream: false, chat_completion_source: source,
+                    custom_url: cleanUrl, reverse_proxy: cleanUrl, api_key: apiConfig.apiKey, key: apiConfig.apiKey,
+                    custom_include_headers: apiConfig.apiKey ? `Authorization: Bearer ${apiConfig.apiKey}` : '',
+                    proxy_password: apiConfig.proxyPassword || "",
+                };
+                switch (source) { case API_SOURCES.MAKERSUITE: case 'google': requestBody.google_model = apiConfig.model; break; case API_SOURCES.CLAUDE: requestBody.claude_model = apiConfig.model; break; case API_SOURCES.MISTRALAI: requestBody.mistral_model = apiConfig.model; break; }
+                const response = await fetch('/api/backends/chat-completions/generate', {
+                    method: 'POST', headers: { ...SillyTavern.getContext().getRequestHeaders(), 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestBody), signal: abortSignal,
+                });
+                if (!response.ok) throw new Error(`API request failed: ${response.status} - ${await response.text()}`);
+                const data = await response.json();
+                if (data?.choices?.[0]?.message?.content) return data.choices[0].message.content.trim();
+                throw new Error(`Custom API returned an invalid response.`);
+            }
+            throw new Error(`APIManager: Unknown apiMode`);
+        }
+    }
+
+    // ========================================================================
+    // 6. 基础工具与状态操作函数
+    // ========================================================================
+
+    // [RESTORED FROM V5] Generation Watcher functions
     function stopGenerationWatcher() {
         if (generationWatcherId) {
-            logger.info('[SAM Watcher] Stopping generation watcher.');
             clearInterval(generationWatcherId);
             generationWatcherId = null;
         }
     }
+
     function startGenerationWatcher() {
-        stopGenerationWatcher();
-        logger.info(`[SAM] [Await watcher] Starting generation watcher. Will check UI every ${WATCHER_INTERVAL_MS / 1000}s.`);
-        
-        // 🔧 添加超时保护
-        const GENERATION_TIMEOUT_MS = 300000; // 5分钟
-        const watcherStartTime = Date.now();
-        
+        stopGenerationWatcher(); 
         generationWatcherId = setInterval(() => {
             const isUiGenerating = $('#mes_stop').is(':visible');
-            const elapsedTime = Date.now() - watcherStartTime;
-            
-            // 🔧 超时检测
-            if (elapsedTime > GENERATION_TIMEOUT_MS) {
-                logger.error('[SAM Watcher] Generation timeout! Forcing completion.');
-                stopGenerationWatcher();
-                unifiedEventHandler(FORCE_PROCESS_COMPLETION);
-                return;
-            }
-            
             if (curr_state === STATES.AWAIT_GENERATION && !isUiGenerating) {
-                logger.warn('[SAM] [Await watcher] DETECTED DESYNC! FSM is in AWAIT_GENERATION, but ST is not generating. Forcing state transition.');
+                logger.warn("Generation Watchdog: UI generation stopped, but no 'ended' event received. Forcing completion.");
                 stopGenerationWatcher();
                 unifiedEventHandler(FORCE_PROCESS_COMPLETION);
             } else if (curr_state !== STATES.AWAIT_GENERATION) {
-                logger.info('[SAM Watcher] FSM is no longer awaiting generation. Shutting down watcher.');
                 stopGenerationWatcher();
             }
         }, WATCHER_INTERVAL_MS);
     }
-    async function getRoundCounter() { return SillyTavern.chat.length - 1; }
-    function parseStateFromMessage(messageContent) {
-        if (!messageContent) return null;
-        const match = messageContent.match(STATE_BLOCK_PARSE_REGEX);
-        if (match && match[1]) {
-            try {
-                const parsed = JSON.parse(match[1].trim());
-                return { static: parsed.static ?? {}, time: parsed.time ?? "", volatile: parsed.volatile ?? [], responseSummary: parsed.responseSummary ?? [], func: parsed.func ?? [], events: parsed.events ?? [], event_counter: parsed.event_counter ?? 0 };
-            } catch (error) {
-                logger.error("Failed to parse state JSON.", error);
-                return _.cloneDeep(INITIAL_STATE);
-            }
-        }
-        return null;
-    }
-    async function findLatestState(chatHistory, lastIndex = chatHistory.length - 1) {
-        logger.info(`finding latest state down from ${lastIndex}`);
-        for (let i = lastIndex; i >= 0; i--) {
-            const message = chatHistory[i];
-            if (message.is_user) continue;
-            const state = parseStateFromMessage(message.mes);
-            if (state) {
-                logger.info(`State loaded from message at index ${i}.`);
-                return _.cloneDeep(state);
-            }
-        }
-        logger.info("No previous state found. Using initial state.");
-        return _.cloneDeep(INITIAL_STATE);
-    }
+
     function findLatestUserMsgIndex() {
-        for (let i = SillyTavern.chat.length - 1; i >= 0; i--) {
-            if (SillyTavern.chat[i].is_user) { return i; }
+        const chat = SillyTavern.getContext().chat;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i] && chat[i].is_user) { return i; }
         }
-        return -1;
+        return -1; 
     }
-    // 🔧 使用更快的拷贝方法，避免 _.cloneDeep 的性能问题
-    function goodCopy(state) { 
-        if (!state) return _.cloneDeep(INITIAL_STATE);
-        
-        // 🔧 对于简单对象，使用 JSON 序列化比 _.cloneDeep 更快
-        try {
-            return JSON.parse(JSON.stringify(state));
-        } catch (error) {
-            // 🔧 如果 JSON 方法失败（例如循环引用），回退到 _.cloneDeep
-            logger.warn('goodCopy: JSON method failed, falling back to _.cloneDeep');
-            return _.cloneDeep(state);
+
+    function findLastAiMessageAndIndex() {
+        const chat = SillyTavern.getContext().chat;
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (chat[i] && !chat[i].is_user) { return i; }
+        }
+        return -1; 
+    }
+
+    function add_event_listener(elem, type, listener, options) {
+        if (elem && "function" == typeof elem.addEventListener && "function" == typeof elem.removeEventListener) {
+            elem.addEventListener(type, listener, options);
+            cleanup_pool.push(() => elem.removeEventListener(type, listener, options));
         }
     }
 
-    function getActiveEvent(state) {
-        if (!state.events || state.events.length === 0) return null;
-        for (let i = state.events.length - 1; i >= 0; i--) {
-            if (state.events[i].status === 0) {
-                return state.events[i];
+    function bindTavernEvent(eventName, handler) {
+        eventOn(eventName, handler);
+        cleanup_pool.push(() => {eventRemoveListener(eventName, handler); });
+    }
+
+    async function loadExternalLibrary(url, libName) {
+        if (libName === 'jsonrepair' && local_jsonrepair) return true;
+        if (libName === 'MiniSearch' && local_MiniSearch) return true;
+
+        if (_loadingLibraries[url]) return await _loadingLibraries[url];
+
+        logger.info(`Downloading external library: ${libName}...`);
+
+        _loadingLibraries[url] = (async () => {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const code = await response.text();
+
+                const mockModule = { exports: {} };
+                const fn = new Function('module', 'exports', code);
+                fn(mockModule, mockModule.exports);
+
+                let exported = mockModule.exports;
+                if (exported && typeof exported !== 'function') {
+                    if (exported[libName]) exported = exported[libName];
+                    else if (exported.default) exported = exported.default;
+                }
+
+                if (libName === 'jsonrepair') local_jsonrepair = exported;
+                if (libName === 'MiniSearch') local_MiniSearch = exported;
+
+                logger.info(`Library ${libName} loaded successfully.`);
+                updateUIStatus();
+                return true;
+            } catch (error) {
+                logger.warn(`Failed to load script: ${url}`, error);
+                updateUIStatus();
+                return false;
+            } finally {
+                delete _loadingLibraries[url];
             }
-        }
-        return null;
+        })();
+
+        return await _loadingLibraries[url];
+    }
+
+    function goodCopy(state) { return _.cloneDeep(state || INITIAL_STATE); }
+
+    function loadSamSettings() {
+        const { extensionSettings } = SillyTavern.getContext();
+        if (!extensionSettings[MODULE_NAME]) extensionSettings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
+        _.defaultsDeep(extensionSettings[MODULE_NAME], DEFAULT_SETTINGS);
+        samSettings = extensionSettings[MODULE_NAME];
+        return samSettings;
+    }
+
+    function saveSamSettings() {
+        const { extensionSettings, saveSettingsDebounced } = SillyTavern.getContext();
+        extensionSettings[MODULE_NAME] = samSettings;
+        saveSettingsDebounced();
+        if (UI_STATE.panelOpen) renderTabContent();
+    }
+
+    async function checkWorldInfoActivation() {
+        try {
+            const characterId = SillyTavern.getContext().characterId;
+            if (characterId === null || characterId < 0) { go_flag = false; return; }
+            const char = SillyTavern.getContext().characters[characterId];
+            const worldInfoName = char?.data?.extensions?.world;
+            if (!worldInfoName) { go_flag = false; return; }
+            const wi = await SillyTavern.getContext().loadWorldInfo(worldInfoName);
+            if (!wi) { go_flag = false; return; }
+            go_flag = Object.values(wi.entries).some(item => item.comment === SAM_FUNCTIONLIB_ID);
+        } catch (e) { go_flag = false; }
+    }
+
+    async function getFunctionsFromWI() {
+        try {
+            const characterId = SillyTavern.getContext().characterId;
+            if (characterId === null || characterId < 0) return[];
+            const worldInfoName = SillyTavern.getContext().characters[characterId]?.data?.extensions?.world;
+            if (!worldInfoName) return[];
+            const wiData = await SillyTavern.getContext().loadWorldInfo(worldInfoName);
+            const funcEntry = Object.values(wiData?.entries || {}).find(e => e.comment === SAM_FUNCTIONLIB_ID);
+            return funcEntry && funcEntry.content ? JSON.parse(funcEntry.content) :[];
+        } catch (e) { return[]; }
     }
 
     async function getBaseDataFromWI() {
-        const WI_ENTRY_NAME = "__SAM_base_data__";
         try {
-            const worldbookNames = await getCharWorldbookNames("current");
-            if (!worldbookNames || !worldbookNames.primary) {
-                logger.info(`Base data check: No primary worldbook assigned.`);
-                return null;
-            }
-            const wi = await getWorldbook(worldbookNames.primary);
-            if (!wi || !Array.isArray(wi)) {
-                logger.warn(`Base data check: Could not retrieve entries for worldbook "${worldbookNames.primary}".`);
-                return null;
-            }
-            const baseDataEntry = wi.find(entry => entry.name === WI_ENTRY_NAME);
-            if (!baseDataEntry) {
-                logger.info(`Base data check: No entry named "${WI_ENTRY_NAME}" found in worldbook "${worldbookNames.primary}".`);
-                return null;
-            }
-            if (!baseDataEntry.content) {
-                logger.warn(`Base data check: Entry "${WI_ENTRY_NAME}" found, but its content is empty.`);
-                return null;
-            }
-            try {
-                const parsedData = JSON.parse(baseDataEntry.content);
-                logger.info(`Successfully parsed base data from "${WI_ENTRY_NAME}".`);
-                return parsedData;
-            } catch (jsonError) {
-                logger.error(`Base data check: Failed to parse JSON from entry "${WI_ENTRY_NAME}".`, jsonError);
-                return null;
-            }
-        } catch (error) {
-            logger.error(`Base data check: An unexpected error occurred while fetching world info.`, error);
-            return null;
-        }
-    }
-    
-    async function runSandboxedFunction(funcName, params, state) {
-        const funcDef = state.func?.find(f => f.func_name === funcName);
-        if (!funcDef) { logger.warn(`EVAL: Function '${funcName}' not found.`); return; }
-        const timeout = funcDef.timeout ?? 2000;
-        const allowNetwork = funcDef.network_access === true;
-        const rawParamNames = funcDef.func_params || [];
-        let formalParamNames = [];
-        let restParamName = null;
-        for (const param of rawParamNames) {
-            if (param.startsWith('...')) { restParamName = param.substring(3); }
-            else { formalParamNames.push(param); }
-        }
-        let bodyPrologue = '';
-        if (restParamName) {
-            const startIndex = formalParamNames.length;
-            bodyPrologue = `const ${restParamName} = Array.from(arguments).slice(${4 + startIndex});\n`;
-        }
-        const executionPromise = new Promise(async (resolve, reject) => {
-            try {
-                const networkBlocker = () => { throw new Error('EVAL: Network access is disabled for this function.'); };
-                const fetchImpl = allowNetwork ? window.fetch.bind(window) : networkBlocker;
-                const xhrImpl = allowNetwork ? window.XMLHttpRequest : networkBlocker;
-                const argNames = ['state', '_', 'fetch', 'XMLHttpRequest', ...formalParamNames];
-                const argValues = [state, _, fetchImpl, xhrImpl, ...params];
-                const functionBody = `'use strict';\n${bodyPrologue}${funcDef.func_body}`;
-                const userFunction = new Function(...argNames, functionBody);
-                const result = await userFunction.apply(null, argValues);
-                resolve(result);
-            } catch (error) { reject(error); }
-        });
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`EVAL: Function '${funcName}' timed out after ${timeout}ms.`)), timeout);
-        });
-        try {
-            const result = await Promise.race([executionPromise, timeoutPromise]);
-            logger.info(`EVAL: Function '${funcName}' executed successfully.`, { result });
-        } catch (error) {
-            logger.error(`EVAL: Error executing function '${funcName}'.`, error);
-        }
+            const characterId = SillyTavern.getContext().characterId;
+            if (characterId === null || characterId < 0) return null;
+            const worldInfoName = SillyTavern.getContext().characters[characterId]?.data?.extensions?.world;
+            if (!worldInfoName) return null;
+            const wiData = await SillyTavern.getContext().loadWorldInfo(worldInfoName);
+            const baseDataEntry = Object.values(wiData?.entries || {}).find(e => e.comment === SAM_BASEDATA_ID);
+            return baseDataEntry && baseDataEntry.content ? JSON.parse(baseDataEntry.content) : null;
+        } catch (e) { return null; }
     }
 
-    // --- CORE LOGIC ---
-    async function processVolatileUpdates(state) {
-        if (!state.volatile || !state.volatile.length) return [];
-        const promotedCommands = [];
-        const remainingVolatiles = [];
-        const currentRound = await getRoundCounter();
-        const currentTime = state.time ? new Date(state.time) : new Date();
-        for (const volatile of state.volatile) {
-            const [varName, varValue, isRealTime, targetTime] = volatile;
-            let triggered = isRealTime ? (currentTime >= new Date(targetTime)) : (currentRound >= targetTime);
-            if (triggered) {
-                const params = `${JSON.stringify(varName)}, ${JSON.stringify(varValue)}`;
-                promotedCommands.push({ type: 'SET', params: params });
+    async function saveFunctionsToWI(functions) {
+        if (!go_flag) { toastr.error("无法保存: 世界信息中未找到SAM标识符。"); return; }
+        const characterWIName = await TavernHelper.getCurrentCharPrimaryLorebook();
+        if (!characterWIName) { toastr.error("此角色没有关联的世界信息文件。"); return; }
+
+        try {
+            let wi = await SillyTavern.getContext().loadWorldInfo(characterWIName);
+            const entryKey = _.findKey(wi.entries, (entry) => entry.comment === SAM_FUNCTIONLIB_ID);
+            const content = JSON.stringify(functions, null, 2);
+
+            if (entryKey) {
+                wi.entries[entryKey].content = content;
+                await TavernHelper.updateWorldInfo(characterWIName, wi);
             } else {
-                remainingVolatiles.push(volatile);
+                toastr.warning("未找到SAM函数库条目，请先在世界信息中手动创建一个comment为'__SAM_IDENTIFIER__'的条目。");
+            }
+            toastr.success("函数已成功保存至世界信息。");
+        } catch (e) { console.error(e); toastr.error("保存函数至世界信息失败。"); }
+    }
+
+    async function initializeDatabase(dbStateJson = null) {
+        if (!sam_db) sam_db = new SAMDatabase({ enabled: true });
+        await sam_db.init();
+        if (dbStateJson) {
+            try { sam_db.import(dbStateJson); } catch(e){}
+        }
+    }
+    function serialize_db() {
+        if (sam_db && sam_db.isInitialized) {
+            const allMemos = sam_db.getAllMemosAsObject(); // Assuming this is synchronous
+            if (allMemos && Object.keys(allMemos).length > 0) {
+                return Object.entries(allMemos).map(([k, v]) => `Key: ${k}\nContent: ${v}`).join('\n\n');
             }
         }
-        state.volatile = remainingVolatiles;
-        return promotedCommands;
+        return "尚未储存任何设定。";
     }
-    async function applyCommandsToState(commands, state) {
-        if (!commands || commands.length === 0) return state;
-        const currentRound = await getRoundCounter();
-        let modifiedListPaths = new Set();
-        
-        // 🔧 使用动态批次大小，自动适配设备性能
-        for (let i = 0; i < commands.length; i++) {
-            const command = commands[i];
-            
-            // 🔧 根据设备类型动态调整释放频率
-            if (i > 0 && i % COMMAND_BATCH_SIZE === 0) {
-                await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-            }
-            
-            let params;
+
+    async function runSandboxedFunction(funcName, params, state) {
+        const funcDef = samFunctions.find(f => f.func_name === funcName);
+        if (!funcDef) return;
+        const timeout = funcDef.timeout ?? 2000;
+        const formalParamNames =[]; let restParamName = null;
+        for (const param of (funcDef.func_params ||[])) {
+            if (param.startsWith('...')) restParamName = param.substring(3);
+            else formalParamNames.push(param);
+        }
+        let bodyPrologue = restParamName ? `const ${restParamName} = Array.from(arguments).slice(${4 + formalParamNames.length});\n` : '';
+        const fetchImpl = funcDef.network_access ? window.fetch.bind(window) : () => { throw new Error('Network disabled'); };
+
+        const execPromise = new Promise(async (resolve, reject) => {
             try {
-                const paramsString = command.params.trim();
-                params = paramsString ? JSON.parse(`[${paramsString}]`) : [];
-            } catch (error) {
-                logger.error(`Failed to parse parameters for command ${command.type}. Params: "${command.params}"`, error);
-                continue;
-            }
-            try {
-                switch (command.type) {
-                    case 'SET': { _.set(state.static, params[0], params[1]); break; }
-                    case 'ADD': {
-                        const [varName, valueToAdd] = params;
-                        const existing = _.get(state.static, varName, 0);
-                        if (Array.isArray(existing)) { existing.push(valueToAdd); }
-                        else { _.set(state.static, varName, (Number(existing) || 0) + Number(valueToAdd)); }
-                        break;
-                    }
-                    case 'RESPONSE_SUMMARY': {
-                        if (!Array.isArray(state.responseSummary)) { state.responseSummary = []; }
-                        if (params[0] && !state.responseSummary.includes(params[0])) { state.responseSummary.push(params[0]); }
-                        break;
-                    }
-                    case "TIME": {
-                        if (state.time) { state.dtime = new Date(params[0]) - new Date(state.time); }
-                        else { state.dtime = 0; }
-                        state.time = params[0];
-                        break;
-                    }
-                    case 'TIMED_SET': {
-                        const [varName, varValue, reason, isRealTime, timepoint] = params;
-                        const targetTime = isRealTime ? new Date(timepoint).toISOString() : currentRound + Number(timepoint);
-                        if (!state.volatile) state.volatile = [];
-                        state.volatile.push([varName, varValue, isRealTime, targetTime, reason]);
-                        break;
-                    }
-                    case 'CANCEL_SET': {
-                        const identifier = params[0];
-                        const index = parseInt(identifier, 10);
-                        if (!isNaN(index)) { state.volatile.splice(index, 1); }
-                        else { state.volatile = state.volatile.filter(entry => entry[0] !== identifier && entry[4] !== identifier); }
-                        break;
-                    }
-                    case 'DEL': {
-                        const [listPath, index] = params;
-                        const list = _.get(state.static, listPath);
-                        if (Array.isArray(list) && index >= 0 && index < list.length) {
-                            list[index] = undefined;
-                            modifiedListPaths.add(listPath);
-                        }
-                        break;
-                    }
-                    case 'SELECT_DEL': {
-                        const [listPath, identifier, targetId] = params;
-                        _.update(state.static, listPath, list => _.reject(list, { [identifier]: targetId }));
-                        break;
-                    }
-                    case 'SELECT_ADD': {
-                        const [listPath, selProp, selVal, recProp, valToAdd] = params;
-                        const list = _.get(state.static, listPath);
-                        if (!Array.isArray(list)) {
-                            logger.warn(`[SAM] SELECT_ADD failed: Path "${listPath}" is not a list.`);
-                            toastr.warning(`SAM SELECT_ADD: Path "${listPath}" is not a list.`);
-                            break;
-                        }
-                        const targetIndex = _.findIndex(list, { [selProp]: selVal });
-                        if (targetIndex > -1) {
-                            const fullPath = `${listPath}[${targetIndex}].${recProp}`;
-                            const existing = _.get(state.static, fullPath);
-                            if (Array.isArray(existing)) {
-                                existing.push(valToAdd); // Must get reference and push for arrays
-                            } else {
-                                const newValue = (Number(existing) || 0) + Number(valToAdd);
-                                _.set(state.static, fullPath, newValue);
-                            }
-                        } else {
-                            logger.warn(`[SAM] SELECT_ADD failed: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
-                            toastr.warning(`SAM SELECT_ADD: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
-                        }
-                        break;
-                    }
-                    case 'SELECT_SET': {
-                        const [listPath, selProp, selVal, recProp, valToSet] = params;
-                        const list = _.get(state.static, listPath);
-                        if (!Array.isArray(list)) {
-                            logger.warn(`[SAM] SELECT_SET failed: Path "${listPath}" is not a list.`);
-                            toastr.warning(`SAM SELECT_SET: Path "${listPath}" is not a list.`);
-                            break;
-                        }
-                        const targetIndex = _.findIndex(list, (item) => _.get(item, selProp) === selVal);
-
-                        if (targetIndex > -1) {
-                            const fullPath = `${listPath}[${targetIndex}].${recProp}`;
-                            _.set(state.static, fullPath, valToSet);
-                            
-                        } else {
-                            toastr.warning(`SAM SELECT_SET: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
-                            logger.warn(`[SAM] SELECT_SET failed to find object: Target not found with selector ${selProp}=${JSON.stringify(selVal)} in list ${listPath}.`);
-                        }
-                        break;
-                    }
-                    case 'EVENT_BEGIN': {
-                        if (getActiveEvent(state)) {
-                            logger.error(`EVENT_BEGIN failed: An event is already active. Use EVENT_END first.`);
-                            break;
-                        }
-                        const [name, objective, ...initialProcs] = params;
-                        if (!name || !objective) {
-                            logger.error("EVENT_BEGIN failed: 'name' and 'objective' are required.");
-                            break;
-                        }
-                        state.event_counter = (state.event_counter || 0) + 1;
-                        const newEvent = {
-                            name: name,
-                            evID: state.event_counter,
-                            start_time: state.time || new Date().toISOString(),
-                            end_time: null,
-                            objective: objective,
-                            members: [],
-                            procedural: initialProcs || [],
-                            new_defines: [],
-                            status: 0, // 0 = in-progress
-                            summary: null
-                        };
-                        if (!state.events) state.events = [];
-                        state.events.push(newEvent);
-                        logger.info(`Started new event '${name}' (ID: ${newEvent.evID}).`);
-                        break;
-                    }
-                    case 'EVENT_END': {
-                        const activeEvent = getActiveEvent(state);
-                        if (!activeEvent) {
-                            logger.warn("EVENT_END called but no active event was found.");
-                            break;
-                        }
-                        const exitCode = params[0] ?? 1; // Default to 1 (success)
-                        const summary = params[1] || null;
-
-                        activeEvent.status = exitCode;
-                        activeEvent.end_time = state.time || new Date().toISOString();
-                        if (summary) {
-                            activeEvent.summary = summary;
-                        }
-                        logger.info(`Event '${activeEvent.name}' (ID: ${activeEvent.evID}) ended with status ${exitCode}.`);
-                        break;
-                    }
-                    case 'EVENT_ADD_PROC': {
-                        const activeEvent = getActiveEvent(state);
-                        if (!activeEvent) { logger.warn("EVENT_ADD_PROC called but no active event was found."); break; }
-                        params.forEach(proc => activeEvent.procedural.push(proc));
-                        break;
-                    }
-                    case 'EVENT_ADD_DEFN': {
-                        const activeEvent = getActiveEvent(state);
-                        if (!activeEvent) { logger.warn("EVENT_ADD_DEFN called but no active event was found."); break; }
-                        if (params.length < 2) { logger.warn("EVENT_ADD_DEFN requires a name and a description."); break; }
-                        activeEvent.new_defines.push({ name: params[0], desc: params[1] });
-                        break;
-                    }
-                    case 'EVENT_ADD_MEMBER': {
-                        const activeEvent = getActiveEvent(state);
-                        if (!activeEvent) { logger.warn("EVENT_ADD_MEMBER called but no active event was found."); break; }
-                        params.forEach(member => {
-                            if (!activeEvent.members.includes(member)) {
-                                activeEvent.members.push(member);
-                            }
-                        });
-                        break;
-                    }
-                    case 'EVENT_SUMMARY': {
-                        const activeEvent = getActiveEvent(state);
-                        if (!activeEvent) { logger.warn("EVENT_SUMMARY called but no active event was found."); break; }
-                        activeEvent.summary = params[0] || null;
-                        break;
-                    }
-                    case 'EVAL': {
-                        const [funcName, ...funcParams] = params;
-                        await runSandboxedFunction(funcName, funcParams, state);
-                        break;
-                    }
-                }
-            } catch (error) {
-                logger.error(`Error processing command: ${JSON.stringify(command)}`, error);
-            }
-        }
-        for (const path of modifiedListPaths) {
-            _.update(state.static, path, list => _.filter(list, item => item !== undefined));
-        }
-        return state;
-    }
-    async function executeCommandPipeline(messageCommands, state) {
-        const periodicCommands = state.func?.filter(f => f.periodic === true).map(f => ({ type: 'EVAL', params: `"${f.func_name}"` })) || [];
-        const allPotentialCommands = [...messageCommands, ...periodicCommands];
-        const priorityCommands = [], firstEvalItems = [], lastEvalItems = [], normalCommands = [];
-        const funcDefMap = new Map(state.func?.map(f => [f.func_name, f]) || []);
-
-        for (const command of allPotentialCommands) {
-            if (command.type === "TIME") { priorityCommands.push(command); continue; }
-            if (command.type === 'EVAL') {
-                const funcName = (command.params.split(',')[0] || '').trim().replace(/"/g, '');
-                const funcDef = funcDefMap.get(funcName);
-                if (funcDef?.order === 'first') { firstEvalItems.push({ command, funcDef }); }
-                else if (funcDef?.order === 'last') { lastEvalItems.push({ command, funcDef }); }
-                else { normalCommands.push(command); }
-            } else { normalCommands.push(command); }
-        }
-
-        const sortBySequence = (a, b) => (a.funcDef.sequence || 0) - (b.funcDef.sequence || 0);
-        firstEvalItems.sort(sortBySequence); lastEvalItems.sort(sortBySequence);
-        const firstCommands = firstEvalItems.map(item => item.command);
-        const lastCommands = lastEvalItems.map(item => item.command);
-
-        logger.info(`Executing ${priorityCommands.length} priority commands.`);
-        await applyCommandsToState(priorityCommands, state);
-        logger.info(`Executing ${firstCommands.length} 'first' order commands.`);
-        await applyCommandsToState(firstCommands, state);
-        logger.info(`Executing ${normalCommands.length} normal order commands.`);
-        await applyCommandsToState(normalCommands, state);
-        logger.info(`Executing ${lastCommands.length} 'last' order commands.`);
-        await applyCommandsToState(lastCommands, state);
-        return state;
-    }
-
-    // 🔧 分片 JSON.stringify，避免阻塞主线程
-    async function chunkedStringify(obj) {
-        return new Promise((resolve) => {
-            // 🔧 使用动态延迟，自动适配设备性能
-            setTimeout(() => {
-                try {
-                    const result = JSON.stringify(obj, null, 2);
-                    resolve(result);
-                } catch (error) {
-                    logger.error('JSON stringify failed:', error);
-                    resolve('{}'); // 失败时返回空对象
-                }
-            }, DELAY_MS);
+                const userFunc = new Function('state', '_', 'fetch', 'XMLHttpRequest', ...formalParamNames, `'use strict';\n${bodyPrologue}${funcDef.func_body}`);
+                resolve(await userFunc.apply(null,[state, _, fetchImpl, null, ...params]));
+            } catch (err) { reject(err); }
         });
+        try {
+            await Promise.race([execPromise, new Promise((_, r) => setTimeout(()=>r(new Error("Timeout")), timeout))]); }
+        catch(e) {
+            logger.error(`Function "${funcName}" execution failed:`, e);
+        }
+    }
+
+    function parseJsonPointer(pointer) {
+        if (typeof pointer !== 'string' || pointer.length === 0 || pointer[0] !== '/') {
+            throw new Error(`Invalid JSON Pointer: must be a string starting with '/'. Received: ${pointer}`);
+        }
+        if (pointer === '/') return[];
+        return pointer.substring(1).split('/').map(part => part.replace(/~1/g, '/').replace(/~0/g, '~'));
+    }
+
+    function generateJSONPatch(obj1, obj2) {
+        const patches =[];
+
+        function escapePath(str) {
+            return String(str).replace(/~/g, '~0').replace(/\//g, '~1');
+        }
+
+        function diff(a, b, path) {
+            if (a === b) return;
+
+            if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+                if (Array.isArray(a) && Array.isArray(b)) {
+                    const minLen = Math.min(a.length, b.length);
+                    for (let i = 0; i < minLen; i++) { diff(a[i], b[i], `${path}/${i}`); }
+                    if (b.length > a.length) {
+                        for (let i = a.length; i < b.length; i++) { patches.push({ op: 'insert', path: `${path}/${i}`, value: b[i] }); }
+                    } else if (a.length > b.length) {
+                        for (let i = a.length - 1; i >= b.length; i--) { patches.push({ op: 'remove', path: `${path}/${i}` }); }
+                    }
+                } else if (!Array.isArray(a) && !Array.isArray(b)) {
+                    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+                    for (const key of keys) {
+                        const newPath = `${path}/${escapePath(key)}`;
+                        if (!b.hasOwnProperty(key)) { patches.push({ op: 'remove', path: newPath }); } 
+                        else if (!a.hasOwnProperty(key)) { patches.push({ op: 'insert', path: newPath, value: b[key] }); } 
+                        else { diff(a[key], b[key], newPath); }
+                    }
+                } else { patches.push({ op: 'replace', path: path, value: b }); }
+            } else { patches.push({ op: 'replace', path: path, value: b }); }
+        }
+
+        diff(obj1, obj2, '');
+        return patches;
+    }
+
+    async function applyOperationsToState(operations, state, isLiveGeneration = false) {
+        if (!operations || operations.length === 0) return { state, generatedDiffs:[] };
+
+        let generatedDiffs =[];
+
+        for (const op of operations) {
+            if (!op || !op.op) continue;
+            try {
+                if (['replace', 'remove', 'inc', 'mul', 'push', 'addToSet', 'pull', 'pop', 'min', 'max', 'move', 'insert', 'delta'].includes(op.op)) {
+                    let pathStr = op.path !== undefined ? op.path : op.from;
+                    if (typeof pathStr === 'string') {
+                        const pathKeys = parseJsonPointer(pathStr);
+
+                        // skip readonly vars
+                        if (pathKeys.length > 0 && pathKeys[0].startsWith('_')) {
+                            logger.warn(`Skipping operation on read-only variable: ${pathStr}`);
+                            continue;
+                        }
+
+                        let currentVal = _.get(state.static, pathKeys);
+
+                        switch(op.op) {
+                            case 'insert':
+                                if (pathStr.endsWith('/-')) {
+                                    const parentPath = pathStr === '/-' ? '/' : pathStr.slice(0, -2);
+                                    const parentKeys = parseJsonPointer(parentPath);
+                                    let parentVal = parentKeys.length ? _.get(state.static, parentKeys) : state.static;
+                                    if (!Array.isArray(parentVal)) {
+                                        parentVal =[];
+                                        if(parentKeys.length) _.set(state.static, parentKeys, parentVal);
+                                    }
+                                    parentVal.push(op.value);
+                                } else { _.set(state.static, pathKeys, op.value); }
+                                break;
+                            case 'replace': _.set(state.static, pathKeys, op.value); break;
+                            case 'remove': _.unset(state.static, pathKeys); break;
+                            case 'delta': case 'inc': _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) + (Number(op.value) || 0)); break;
+                            case 'mul': _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) * (Number(op.value) || 1)); break;
+                            case 'min': if (typeof currentVal !== 'number' || op.value < currentVal) _.set(state.static, pathKeys, op.value); break;
+                            case 'max': if (typeof currentVal !== 'number' || op.value > currentVal) _.set(state.static, pathKeys, op.value); break;
+                            case 'push':
+                                if (!Array.isArray(currentVal)) { currentVal =[]; _.set(state.static, pathKeys, currentVal); }
+                                if (op.value && typeof op.value === 'object' && op.value.$each && Array.isArray(op.value.$each)) {
+                                    currentVal.push(...op.value.$each);
+                                } else { currentVal.push(op.value); }
+                                break;
+                            case 'addToSet':
+                                if (!Array.isArray(currentVal)) { currentVal =[]; _.set(state.static, pathKeys, currentVal); }
+                                const itemsToAdd = (op.value && typeof op.value === 'object' && op.value.$each && Array.isArray(op.value.$each)) ? op.value.$each :[op.value];
+                                itemsToAdd.forEach(item => { if (!currentVal.some(existing => _.isEqual(existing, item))) currentVal.push(item); });
+                                break;
+                            case 'pop':
+                                if (Array.isArray(currentVal) && currentVal.length > 0) {
+                                    if (op.value === 1) currentVal.pop();
+                                    else if (op.value === -1) currentVal.shift();
+                                }
+                                break;
+                            case 'pull':
+                                if (Array.isArray(currentVal)) {
+                                    _.remove(currentVal, item => {
+                                        if (typeof op.value === 'object' && op.value !== null) return _.isMatch(item, op.value) || _.isEqual(item, op.value);
+                                        return item === op.value;
+                                    });
+                                }
+                                break;
+                            case 'move':
+                                if (currentVal !== undefined && typeof op.to === 'string') {
+                                    const targetKeys = parseJsonPointer(op.to);
+                                    _.set(state.static, targetKeys, currentVal);
+                                    _.unset(state.static, pathKeys);
+                                }
+                                break;
+                        }
+                    }
+                } else if (op.op === 'time') {
+                    if (typeof op.value === 'string') {
+                        if (state.time) {
+                            var d = new Date(op.value) - new Date(state.time);
+                            state.dtime = isNaN(d) ? 0 : d;
+                        } else { state.dtime = 0; }
+                        state.time = op.value;
+                    }
+                } else if (op.op === 'func') {
+                    if (typeof op.func_name === 'string') {
+                        const params = Array.isArray(op.params) ? op.params :[];
+                        const preState = isLiveGeneration ? goodCopy(state.static) : null;
+
+                        await runSandboxedFunction(op.func_name, params, state);
+
+                        if (isLiveGeneration && preState) {
+                            const diffs = generateJSONPatch(preState, state.static);
+                            if (diffs && diffs.length > 0) { generatedDiffs.push(...diffs); }
+                        }
+                    }
+                }
+            } catch(e) { logger.error(`Failed to apply operation:`, op, e); }
+        }
+        return { state, generatedDiffs };
+    }
+
+    async function extractOperationsFromText(messageContent) {
+        const operations =[];
+        let match;
+        UPDATE_BLOCK_EXTRACT_REGEX.lastIndex = 0;
+        while ((match = UPDATE_BLOCK_EXTRACT_REGEX.exec(messageContent)) !== null) {
+            let content = match[1].trim();
+            if (!content) continue;
+            if (!content.startsWith('[') && !content.endsWith(']')) { content = `[${content}]`; }
+            try {
+                if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                let textToParse = content;
+                if (local_jsonrepair) { try { textToParse = local_jsonrepair(content); } catch (e) {} }
+
+                const parsedData = JSON.parse(textToParse);
+                if (Array.isArray(parsedData)) operations.push(...parsedData);
+                else if (typeof parsedData === 'object' && parsedData !== null) operations.push(parsedData);
+            } catch (e) {
+                logger.error("Skipping malformed <JSONPatch> block due to parsing error:", e, "\nContent:", match[1]);
+                if (typeof toastr !== 'undefined') toastr.warning("SAM: Skipped a malformed data block.", "Parsing Warning");
+            }
+        }
+        return operations;
+    }
+
+    async function buildStateFromHistory(targetIndex) {
+        const chat = SillyTavern.getContext().chat;
+        let rebuiltState = goodCopy(INITIAL_STATE);
+        let checkpointIndex = -1;
+
+        if (samData) {
+            rebuiltState.jsondb = samData.jsondb;
+            rebuiltState.responseSummary = _.cloneDeep(samData.responseSummary);
+            rebuiltState.summary_progress = samData.summary_progress;
+            rebuiltState.summary_failed_progress = samData.summary_failed_progress || -1;
+        }
+
+        // 1. Trace BACKWARDS to find the latest Checkpoint
+        for (let i = targetIndex; i >= 0; i--) {
+            const msg = chat[i];
+            if (!msg || msg.is_user) continue;
+
+            const v6Match = msg.mes.match(CHECKPOINT_REGEX);
+            if (v6Match && v6Match[1]) {
+                try {
+                    const parsed = JSON.parse(v6Match[1].trim());
+                    rebuiltState = _.merge({}, rebuiltState, parsed);
+                    checkpointIndex = i;
+                    break;
+                } catch (e) {}
+            }
+
+            const v5Match = msg.mes.match(OLD_STATE_PARSE_REGEX);
+            if (v5Match && v5Match[1]) {
+                try {
+                    const parsed = JSON.parse(v5Match[1].trim());
+                    rebuiltState = _.merge({}, rebuiltState, parsed);
+                    checkpointIndex = i;
+                    break;
+                } catch (e) {}
+            }
+        }
+
+        // 2. Load Base Data if no checkpoint found
+        if (checkpointIndex === -1 && targetIndex >= 0) {
+            const baseData = await getBaseDataFromWI();
+            if (baseData) rebuiltState.static = _.merge({}, rebuiltState.static, baseData);
+        }
+
+        // 3. Trace FORWARD from the checkpoint
+        const startIndex = checkpointIndex === -1 ? 0 : checkpointIndex + 1;
+        const limit = Math.min(targetIndex, chat.length - 1);
+
+        for (let i = startIndex; i <= limit; i++) {
+            const msg = chat[i];
+            if (!msg || msg.is_user) continue;
+
+            const ops = await extractOperationsFromText(msg.mes);
+            if (ops.length > 0) {
+                const { state } = await applyOperationsToState(ops, rebuiltState, false);
+                rebuiltState = state;
+            }
+        }
+        return rebuiltState;
+    }
+
+    // [RESTORED FROM V5] Exact memory caching logic
+    async function loadStateToMemory(targetIndex) {
+
+        console.log("Loading state to memory for target index:", targetIndex);
+        const chat = SillyTavern.getContext().chat;
+        if (targetIndex === "{{lastMessageId}}") { targetIndex = chat.length - 1; }
+        
+        let state = await buildStateFromHistory(targetIndex);
+        
+        if (targetIndex === 0) {
+            const baseData = await getBaseDataFromWI();
+            if (baseData) { state.static = _.merge({}, state.static, baseData); }
+        }
+        
+        samData = state; 
+        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
+        updateUIStatus();
+        return state;
+    }
+
+    // [RESTORED FROM V5] The explicit sync function
+    async function sync_latest_state() {
+        logger.info("Synchronizing SAM state with the latest chat history.");
+        let lastAiIndex = findLastAiMessageAndIndex();
+        await loadStateToMemory(lastAiIndex);
+        if (UI_STATE.panelOpen) { renderTabContent(); }
+    }
+
+    // ========================================================================
+    // 7. 自动总结 (Auto-Summary) & 数据写入流程
+    // ========================================================================
+    
+    async function triggerSummaryCheck(currentIndex) {
+        await checkWorldInfoActivation();
+        if (!go_flag || !samSettings.data_enable) return;
+
+        const period = samSettings.summary_levels.L2.frequency;
+        const last_progress = samData.summary_progress || 0;
+        const last_failed = samData.summary_failed_progress || -1;
+        
+        const effective_baseline = Math.max(last_progress, last_failed);
+
+        if (currentIndex - effective_baseline >= period) {
+            logger.info(`Summary threshold reached (${currentIndex - effective_baseline}/${period}).`);
+            curr_state = STATES.SUMMARIZING; updateUIStatus();
+            
+            const oldProgress = samData.summary_progress;
+            await processBatchSummarizationRun(currentIndex, false);
+            
+            if (samData.summary_progress === oldProgress) {
+                samData.summary_failed_progress = currentIndex;
+            } else {
+                samData.summary_failed_progress = -1;
+            }
+            
+            curr_state = STATES.IDLE; updateUIStatus();
+        }
+    }
+
+    async function checkAndGenerateL3Summaries() {
+        const l3Set = samSettings.summary_levels.L3;
+        if (!l3Set.enabled) return;
+
+        while (samData.responseSummary.L2.length >= l3Set.frequency) {
+            const toCondense = samData.responseSummary.L2.slice(0, l3Set.frequency);
+            const l3Str = toCondense.map(s => `[Messages ${s.index_begin}-${s.index_end}]: ${s.content}`).join('\n');
+            const pL3 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt_L3, { summary_content: l3Str });
+            
+            if (typeof toastr !== 'undefined') toastr.info(`[SAM] 开始生成 L3 摘要...`);
+            try {
+                const resultL3 = (samSettings.summary_api_preset && apiManager) ? await apiManager.generate([{ role: 'user', content: pL3 }], samSettings.summary_api_preset)
+                                : await SillyTavern.getContext().generateQuietPrompt({ quietPrompt: pL3, skipWIAN: samSettings.skipWIAN_When_summarizing });
+                if (resultL3) {
+                    samData.responseSummary.L3.push({ index_begin: toCondense[0].index_begin, index_end: toCondense[toCondense.length-1].index_end, content: resultL3, level: 0 });
+                    samData.responseSummary.L2.splice(0, l3Set.frequency);
+                } else {
+                    break;
+                }
+            } catch(e) {
+                logger.error("L3 Summary failed", e);
+                break;
+            }
+        }
+    }
+
+    async function generateSingleL2Summary(startIndex, endIndex, force = false) {
+        const chat = SillyTavern.getContext().chat;
+        if (!samData.responseSummary) samData.responseSummary = { L1:[], L2:[], L3:[] };
+
+        if (force) { 
+            samData.responseSummary.L2 = samData.responseSummary.L2.filter(s => s.index_begin >= endIndex || s.index_end <= startIndex); 
+        }
+
+        const msgs = chat.slice(startIndex, endIndex);
+        if (msgs.length === 0) return false;
+
+        const contentStr = msgs.map(m => {
+            let processed = m.mes
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '')
+                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
+                .trim();
+            samSettings.regexes.forEach(rx => { if(rx.enabled && rx.regex_body) try { processed = processed.replace(new RegExp(rx.regex_body, 'g'), ''); }catch(e){} });
+            return `${m.name}: ${processed}`;
+        }).join('\n');
+
+        const db_content = sam_db && sam_db.isInitialized ? Object.entries(sam_db.getAllMemosAsObject()).map(([k,v])=>`Key: ${k}\nContent: ${v}`).join('\n\n') : "无现有设定";
+        const promptL2 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt, { db_content, chat_content: contentStr });
+
+        let resultL2;
+        if (typeof toastr !== 'undefined') toastr.info(`[SAM] 开始生成摘要 (${startIndex}-${endIndex})...`);
+        try {
+            if (samSettings.summary_api_preset && apiManager) {
+                resultL2 = await apiManager.generate([{ role: 'user', content: promptL2 }], samSettings.summary_api_preset);
+            } else {
+                resultL2 = await SillyTavern.getContext().generateQuietPrompt({ quietPrompt: promptL2, skipWIAN: samSettings.skipWIAN_When_summarizing });
+            }
+        } catch (e) {
+            logger.error("L2 Summary failed", e);
+            if (typeof toastr !== 'undefined') toastr.error(`L2 摘要失败: ${e.message}`); return false; 
+        }
+
+        if (!resultL2) return false;
+
+        const dbOperations = await extractOperationsFromText(resultL2);
+        for (const op of dbOperations) {
+            if (op.op === 'insert' && op.path && op.value && typeof op.value.content === 'string') {
+                const pathParts = op.path.split('/');
+                const key = pathParts[pathParts.length - 1];
+                if (key) { sam_db.setMemo(key, op.value.content, Array.isArray(op.value.keywords) ? op.value.keywords :[]); }
+            }
+        }
+
+        const cleanL2 = resultL2.replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim();
+
+        if (cleanL2) {
+            samData.responseSummary.L2.push({ index_begin: startIndex, index_end: endIndex, content: cleanL2, level: 0 });
+            return true;
+        }
+        return false;
+    }
+
+    async function processBatchSummarizationRun(targetIndex, force = false) {
+        let last_progress = samData.summary_progress || 0;
+        const l2_freq = samSettings.summary_levels.L2.frequency;
+        let anySuccess = false;
+
+        while (targetIndex - last_progress >= l2_freq) {
+            const chunkEndIndex = last_progress + l2_freq;
+            logger.info(`Running L2 summary for chunk ${last_progress} - ${chunkEndIndex}`);
+            const success = await generateSingleL2Summary(last_progress, chunkEndIndex, force);
+            if (!success) {
+                logger.warn(`L2 summary failed at chunk ${last_progress} - ${chunkEndIndex}`);
+                toastr.error(`[SAM] 摘要生成失败 [${last_progress} - ${chunkEndIndex}]`);
+                break;
+            }
+            last_progress = chunkEndIndex;
+            samData.summary_progress = last_progress;
+            anySuccess = true;
+
+            await checkAndGenerateL3Summaries();
+        }
+        
+        if (anySuccess) {
+            if (sam_db.isInitialized) samData.jsondb = sam_db.export();
+            await applyDataToChat(samData);
+            if (typeof toastr !== 'undefined') toastr.success("[SAM] 批量摘要生成完成");
+            if (UI_STATE.panelOpen) renderTabContent();
+        }
+        return anySuccess;
     }
 
     async function processMessageState(index) {
-        logger.info(`processing message state at ${index}`);
-        if (isProcessingState) { logger.warn("Aborting processMessageState: Already processing."); return; }
+        if (isProcessingState) { return; }
         isProcessingState = true;
-        try {
-            if (index === "{{lastMessageId}}") { index = SillyTavern.chat.length - 1; }
-            
-            var state = (await getVariables()).SAM_data;
 
-            const lastAIMessage = SillyTavern.chat[index];
+        try {
+            const chat = SillyTavern.getContext().chat;
+            if (index === "{{lastMessageId}}") { index = chat.length - 1; }
+            const lastAIMessage = chat[index];
             if (!lastAIMessage || lastAIMessage.is_user) return;
 
-            // 🔧 手机端优化：更频繁的主线程释放
-            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+            // [RESTORED FROM V5] Strict use of the prevState cache
+            let state;
+            if (prevState) { state = goodCopy(prevState); }
+            else { state = await buildStateFromHistory(index - 1); }
 
-            const promotedCommands = await processVolatileUpdates(state);
+            let messageContent = lastAIMessage.mes;
+
+            const opsFromMessage = await extractOperationsFromText(messageContent);
+            const periodicOps = samFunctions.filter(f => f.periodic).map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
+
+            const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state, true);
+            samData = newState;
             
-            // 🔧 释放主线程
-            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-            
-            const messageContent = lastAIMessage.mes;
-            
-            // 🔧 释放主线程后再进行正则匹配
-            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-            
-            COMMAND_REGEX.lastIndex = 0;
-            let match;
-            const newCommands = [];
-            
-            // 🔧 手机端优化：分批处理正则匹配，避免长文本卡死
-            let matchCount = 0;
-            while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
-                newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
-                matchCount++;
-                // 🔧 根据设备类型动态调整释放频率
-                if (matchCount % REGEX_MATCH_INTERVAL === 0) {
-                    await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-                }
-            }
-            
-            const allMessageCommands = [...promotedCommands, ...newCommands];
-            logger.info(`---- Found ${allMessageCommands.length} command(s) to process (incl. volatile) ----`);
-            
-            // 🔧 释放主线程
-            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-            
-            // 🔧 分批执行命令，每批后释放主线程
-            const newState = await executeCommandPipeline(allMessageCommands, state);
-            
-            // 🔧 释放主线程后再深拷贝
-            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-            
-            // 🔧 异步更新变量，避免阻塞
+            //[RESTORED FROM V5] Immediately push updated variable memory
             await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newState)); return variables });
-            
-            // 🔧 释放主线程
-            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-            
-            const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
-            
-            // 🔧 分片序列化大对象，避免阻塞主线程
-            const newStateBlock = await chunkedStringify(newState);
-            
-            // 🔧 释放主线程
-            await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-            
-            const finalContent = `${cleanNarrative}\n\n${STATE_BLOCK_START_MARKER}\n${newStateBlock}\n${STATE_BLOCK_END_MARKER}`;
-            
-            await setChatMessage({ message: finalContent }, index, "display_current");
-        } catch (error) {
-            logger.error(`Error in processMessageState for index ${index}:`, error);
-        } finally {
-            logger.info("update finished");
-            isProcessingState = false; // 🔧 确保总是释放锁
-        }
-    }
 
-    async function loadStateFromMessage(index) {
-        if (index === "{{lastMessageId}}") { index = SillyTavern.chat.length - 1; }
-
-        var state;
-        try {
-            const message = SillyTavern.chat[index];
-            if (!message) return;
-            state = parseStateFromMessage(message.mes);
-            if (state) {
-                logger.info(`replacing variables with found state at index ${index}`);
-            } else {
-                logger.info("did not find valid state at index, replacing with latest state");
-                state = await findLatestState(SillyTavern.chat, index);
+            // Build the new block HTML if needed
+            let newBlockHTML = "";
+            if (generatedDiffs && generatedDiffs.length > 0) {
+                const updatedOps =[...opsFromMessage, ...generatedDiffs];
+                const newBlockContent = JSON.stringify(updatedOps, null, 2);
+                newBlockHTML = `<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
+            } else if (opsFromMessage.length > 0) {
+                const newBlockContent = JSON.stringify(opsFromMessage, null, 2);
+                newBlockHTML = `<JSONPatch>\n${newBlockContent}\n</JSONPatch>`;
             }
-        } catch (e) {
-            logger.error(`Load state from message failed for index ${index}:`, e);
-        }
 
-        try {
-            if (index === 0) { 
-                logger.info("[SAM] First AI response detected. Checking for __SAM_base_data__ in World Info.");
-                const baseData = await getBaseDataFromWI();
-                if (baseData) {
-                   logger.info("[SAM] Base data found. Merging it into the current state (current state takes precedence).");
-                   // Deep merge: current state's values overwrite baseData's
-                   state = _.merge({}, baseData, state); 
+            // [RESTORED FROM V5] Explicit cleanup to prevent duplicate blocks
+            // Preserve the original location of the JSONPatch block
+            let cleanNarrative = messageContent
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '');
+
+            let patchReplaced = false;
+            if (newBlockHTML !== "") {
+                if (cleanNarrative.match(UPDATE_BLOCK_REMOVE_REGEX)) {
+                    cleanNarrative = cleanNarrative.replace(UPDATE_BLOCK_REMOVE_REGEX, (match) => {
+                        if (!patchReplaced) {
+                            patchReplaced = true;
+                            return newBlockHTML;
+                        }
+                        return ''; // Remove subsequent blocks
+                    });
                 } else {
-                   logger.info("[SAM] No valid base data found. Proceeding with initial state.");
+                    cleanNarrative = cleanNarrative.trim() + `\n\n${newBlockHTML}`;
                 }
+            } else {
+                cleanNarrative = cleanNarrative.replace(UPDATE_BLOCK_REMOVE_REGEX, '');
             }
-        } catch (error) {
-            logger.error(`[SAM] Error loading base data for index ${index}:`, error);
-        }
 
-        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
-    }
-    async function findLastAiMessageAndIndex(beforeIndex = -1) {
-        const chat = SillyTavern.chat;
-        const searchUntil = (beforeIndex === -1) ? chat.length : beforeIndex;
-        for (let i = searchUntil - 1; i >= 0; i--) {
-            if (chat[i] && chat[i].is_user === false) return i;
+            cleanNarrative = cleanNarrative.trim();
+
+            const currentRound = chat.filter(m => !m.is_user).length;
+            const shouldCheckpoint = samSettings.enable_auto_checkpoint &&
+                                     samSettings.auto_checkpoint_frequency > 0 &&
+                                     (currentRound > 0 && (currentRound % samSettings.auto_checkpoint_frequency === 0 || index === 0));
+
+            if (shouldCheckpoint) {
+                const stateString = await chunkedStringify(samData);
+                cleanNarrative += `\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
+            }
+
+            chat[index].mes = cleanNarrative;
+            await setChatMessages([{ message_id: index, message: cleanNarrative }]);
+
+            await applyDataToChat(samData);
+
+            eventEmit(SAM_RESPONSE_PROCESSING_COMPLETED);
+
+        } catch (error) {
+            logger.error("Error in processMessageState:", error);
+        } finally {
+            isProcessingState = false;
         }
-        return -1;
     }
-    async function sync_latest_state() {
-        var lastlastAIMessageIdx = await findLastAiMessageAndIndex();
-        await loadStateFromMessage(lastlastAIMessageIdx);
-    }
-    async function checkStuckState() {
-        const lastMessage = SillyTavern.chat[SillyTavern.chat.length - 1];
-        if (!lastMessage || lastMessage.is_user) return; // Not an AI message, nothing to check
-        if (!lastMessage.mes.includes(STATE_BLOCK_START_MARKER)) {
-            const warningMsg = "Stuck State Detected: The last AI message is missing its state block. The next turn will use the previous state. This may cause inconsistencies. Consider using the 'Reset State' or 'Rerun Commands' debug buttons if issues persist.";
-            logger.error(`STUCK STATE DETECTED! Message at index ${SillyTavern.chat.length - 1} did not contain a state block after processing. please RESET the current state and MANUALLY update the variables.`);
-            toastr.error(warningMsg);
-        }
-    }
-    async function dispatcher(event, ...event_params) {
-        logger.info(`[FSM Dispatcher] Event: ${event}, State: ${curr_state}`);
+
+    async function applyDataToChat(data) {
+        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(data)); return variables });
         
-        // 🔧 首次运行时输出设备信息
-        if (!dispatcher.deviceLogged) {
-            logger.info(`[SAM] Device Type: ${isMobileDevice ? 'Mobile' : 'Desktop'}`);
-            logger.info(`[SAM] Performance Settings - Delay: ${DELAY_MS}ms, Batch: ${COMMAND_BATCH_SIZE}, RegEx Interval: ${REGEX_MATCH_INTERVAL}`);
-            dispatcher.deviceLogged = true;
-        }
-        
+        await setChatMessages([{"message_id": SillyTavern.getContext().chat.length - 1},
+            {"message_id": SillyTavern.getContext().chat.length - 2}
+            ]
+        );
+
+
+    }
+
+    // ========================================================================
+    // FSM Dispatcher & Event Handling
+    // ========================================================================
+
+    async function dispatcher(event, ...args) {
+        console.log(`[Dispatcher] Received Event: ${event}, Args:`, args);
         try {
             switch (curr_state) {
                 case STATES.IDLE:
                     switch (event) {
+                        case tavern_events.MESSAGE_SENT:
                         case tavern_events.GENERATION_STARTED:
-                            if (event_params[2]) { logger.info("[IDLE] Dry run detected, ignoring."); return; }
-                            if (event_params[0] === "swipe" || event_params[0] === "regenerate") {
-                                logger.info(`[IDLE] ${event_params[0]} detected. Loading from before latest user msg.`);
-                                await loadStateFromMessage(findLatestUserMsgIndex());
+
+                            const type = args[0];
+                            
+                            // DO NOT CHANGE ORDERING. [2] is the dry_run flag, which should prevent any state changes if true. This is critical for correct handling of generation runs.
+                            // if you use args[1] it will read False, and return and early exit the cycle, causing silent fails
+                            if (args[2]) { return; }
+
+                            
+                            if (type === "swipe" || type === "regenerate") {
+                                logger.info(`Processing swipe or regenerate event, reconstructing from index ${findLatestUserMsgIndex()}`);
+                                await loadStateToMemory(findLatestUserMsgIndex());
+                                prevState = goodCopy(samData);
+                            } else if (event === tavern_events.MESSAGE_SENT) {
+                                const lastAiIndex = findLastAiMessageAndIndex();
+                                prevState = await loadStateToMemory(lastAiIndex);
                             }
+                            
                             curr_state = STATES.AWAIT_GENERATION;
                             startGenerationWatcher();
                             break;
-                        case tavern_events.MESSAGE_SENT:
-                            curr_state = STATES.AWAIT_GENERATION;
-                            startGenerationWatcher(); // 🔧 添加 watcher 启动
-                            break;
+
                         case tavern_events.MESSAGE_SWIPED:
+                        case tavern_events.MESSAGE_DELETED:
+                        case tavern_events.MESSAGE_EDITED:
+                        case tavern_events.CHAT_CHANGED:
+                            console.log(`common sync triggered by event ${event}`);
                             await sync_latest_state();
-                            break;
-                        default:
-                            await sync_latest_state();
+                            prevState = goodCopy(samData);
                             break;
                     }
                     break;
+
                 case STATES.AWAIT_GENERATION:
                     switch (event) {
                         case tavern_events.GENERATION_STOPPED:
                         case FORCE_PROCESS_COMPLETION:
                         case tavern_events.GENERATION_ENDED:
                             stopGenerationWatcher();
+                            if (current_run_is_dry) { current_run_is_dry = false; break; }
+                            
                             curr_state = STATES.PROCESSING;
-                            logger.info("[AWAIT] Processing latest message.");
-                            const index = SillyTavern.chat.length - 1;
-                            await processMessageState(index);
-                            await checkStuckState();
-                            logger.info('[AWAIT] Processing complete. Transitioning to IDLE.');
+                            updateUIStatus();
+                            
+                            const chatLen = SillyTavern.getContext().chat.length;
+                            await processMessageState(chatLen - 1);
+                            await triggerSummaryCheck(chatLen);
+                            
                             curr_state = STATES.IDLE;
+                            prevState = null; // Clear snapshot properly
                             break;
                         case tavern_events.CHAT_CHANGED:
                             stopGenerationWatcher();
-                            logger.info('[AWAIT] Chat changed during generation. Aborting and returning to IDLE.');
                             await sync_latest_state();
+                            prevState = goodCopy(samData);
                             curr_state = STATES.IDLE;
                             break;
                     }
                     break;
+                
                 case STATES.PROCESSING:
-                    logger.warn(`[PROCESSING] Received event ${event} while processing. Ignoring.`);
+                case STATES.SUMMARIZING:
+                    logger.warn(`[FSM] Received event ${event} while in ${curr_state} state. Ignoring.`);
                     break;
             }
         } catch (e) {
+            logger.error(`[Dispatcher] FSM failed. Error: ${e}`);
             stopGenerationWatcher();
-            logger.error(`[Dispatcher] FSM Scheduling failed. Error: ${e}`);
-            curr_state = STATES.IDLE; // Failsafe
+            curr_state = STATES.IDLE;
+            prevState = null;
+            isProcessingState = false;
         }
+        updateUIStatus();
     }
-    async function unifiedEventHandler(event, ...args) {
-        // 🔧 队列保护：防止无限增长
-        if (event_queue.length > 100) {
-            logger.error(`[UEH] Event queue overflow! Current size: ${event_queue.length}. Clearing old events.`);
-            event_queue.splice(0, 50); // 清除前50个事件
-        }
-        
-        event_queue.push({ event_id: event, args: [...args] });
-        await unified_dispatch_executor();
-    }
+
     async function unified_dispatch_executor() {
-        if (isDispatching) { return; }
+        if (isDispatching) return;
         isDispatching = true;
-        
-        // 🔧 防止无限循环：限制单次处理事件数量
-        const MAX_EVENTS_PER_BATCH = 20;
-        let processedCount = 0;
-        
-        while (event_queue.length > 0 && processedCount < MAX_EVENTS_PER_BATCH) {
+        while (event_queue.length > 0) {
             const { event_id, args } = event_queue.shift();
-            logger.info(`[UDE] Dequeuing and dispatching event: ${event_id}`);
             try { 
-                await dispatcher(event_id, ...args); 
-                processedCount++;
-            }
-            catch (error) {
-                logger.error(`[UDE] Unhandled error during dispatch of ${event_id}:`, error);
+                    await dispatcher(event_id, ...args); 
+                } 
+                catch (error) { 
+                    logger.error(`Unhandled error during dispatch of ${event_id}:`, error); 
                 curr_state = STATES.IDLE;
             }
         }
-        
         isDispatching = false;
-        
-        // 🔧 如果还有事件，异步继续处理（避免阻塞主线程）
-        if (event_queue.length > 0) {
-            logger.warn(`[UDE] Event queue still has ${event_queue.length} events. Scheduling next batch...`);
-            setTimeout(() => unified_dispatch_executor(), 10);
+        if (event_queue.length > 0) { 
+            setTimeout(() => unified_dispatch_executor(), 10); 
         }
+    }
+
+    async function unifiedEventHandler(event, ...args) {
+        // Yielding to main thread like in V5
+        setTimeout(() => {
+            event_queue.push({ event_id: event, args:[...args] });
+            unified_dispatch_executor();
+        }, 0);
     }
 
     const handlers = {
-		handleGenerationStarted: async (ev, options, dry_run) => {
-			await unifiedEventHandler(
-				tavern_events.GENERATION_STARTED,
-				ev,
-				options,
-				dry_run,
-			);
-		},
-		handleGenerationEnded: async () => {
-			await unifiedEventHandler(tavern_events.GENERATION_ENDED);
-		},
-		handleMessageSwiped: () => {
-			setTimeout(async () => {
-				await unifiedEventHandler(tavern_events.MESSAGE_SWIPED);
-			}, 0);
-		},
-		handleMessageDeleted: (message) => {
-			setTimeout(async () => {
-				await unifiedEventHandler(tavern_events.MESSAGE_DELETED, message);
-			}, 0);
-		},
-		handleMessageEdited: () => {
-			setTimeout(async () => {
-				await unifiedEventHandler(tavern_events.MESSAGE_EDITED);
-			}, 0);
-		},
-		handleChatChanged: () => {
-			setTimeout(async () => {
-				await unifiedEventHandler(tavern_events.CHAT_CHANGED);
-			}, 10);
-		},
-		handleMessageSent: () => {
-			setTimeout(async () => {
-				await unifiedEventHandler(tavern_events.MESSAGE_SENT);
-			}, 0);
-		},
-		handleGenerationStopped: () => {
-			setTimeout(async () => {
-				await unifiedEventHandler(tavern_events.GENERATION_STOPPED);
-			}, 0);
-		},
-	};
+        handleMessageSent: () => unifiedEventHandler(tavern_events.MESSAGE_SENT),
+        
+        // no matter what do not change this, ST formatting issue
+        handleGenerationStarted: async (event_obj, options, dry_run) => await unifiedEventHandler(tavern_events.GENERATION_STARTED, event_obj, options, dry_run),
+        
+        handleGenerationEnded: () => unifiedEventHandler(tavern_events.GENERATION_ENDED),
+        handleGenerationStopped: () => unifiedEventHandler(tavern_events.GENERATION_STOPPED),
+        handleMessageSwiped: () => unifiedEventHandler(tavern_events.MESSAGE_SWIPED),
+        handleMessageDeleted: () => unifiedEventHandler(tavern_events.MESSAGE_DELETED),
+        handleMessageEdited: () => unifiedEventHandler(tavern_events.MESSAGE_EDITED),
+        handleChatChanged: () => unifiedEventHandler(tavern_events.CHAT_CHANGED),
+    };
 
-    function resetCurrentState() {
-        logger.warn("!!! MANUAL STATE RESET TRIGGERED !!!");
-        stopGenerationWatcher();
-        curr_state = STATES.IDLE;
-        isDispatching = false; // Forcefully unlock the dispatcher
-        event_queue.length = 0; // Clear any pending events that might be causing a loop
-        logger.info("FSM forced to IDLE. Event queue cleared. Attempting to re-sync with the latest valid state.");
-        sync_latest_state().then(() => {
-            toastr.success("SAM state has been reset and re-synced.");
-            logger.info("Re-sync successful.");
-        }).catch(err => {
-            toastr.error("SAM state reset, but re-sync failed. Check console.");
-            logger.error("Re-sync failed after manual reset.", err);
-        });
-    }
-
-    async function rerunLatestCommands() {
-        logger.info("--- MANUAL RERUN TRIGGERED ---");
-        if (curr_state !== STATES.IDLE) {
-            const msg = "Cannot rerun commands now. The script is busy. Please wait for it to be idle or use the Reset button first.";
-            logger.warn(msg);
-            toastr.error(msg);
-            return;
+    // ========================================================================
+    // 8. 内部悬浮窗 UI & 样式构建
+    // ========================================================================
+    function updateUIStatus() {
+        if (k.statusText) {
+            k.statusText.textContent = `引擎状态: ${curr_state} | 数据: ${go_flag && samSettings.data_enable ? '活跃' : '休眠'}`;
+            k.statusText.style.color =["PROCESSING", "SUMMARIZING", "AWAIT_GENERATION"].includes(curr_state) ? "#f0ad4e" : "#5cb85c";
         }
+        if (k.depsText) {
+            const jr = local_jsonrepair ? 'green' : 'red';
+            const ms = local_MiniSearch ? 'green' : 'red';
+            const jp = 'green';
 
-        const lastAiIndex = await findLastAiMessageAndIndex();
-        if (lastAiIndex === -1) {
-            toastr.info("No AI message found to rerun.");
-            return;
-        }
-
-        isProcessingState = true; // Lock to prevent race conditions
-        try {
-            toastr.info(`Rerunning commands from message at index ${lastAiIndex}...`);
-            const previousAiIndex = await findLastAiMessageAndIndex(lastAiIndex);
-            const initialState = await findLatestState(SillyTavern.chat, previousAiIndex);
-            logger.info(`Rerun initial state loaded from index ${previousAiIndex}.`);
-
-            const messageToRerun = SillyTavern.chat[lastAiIndex];
-            const messageContent = messageToRerun.mes;
-            COMMAND_REGEX.lastIndex = 0;
-            let match;
-            const newCommands = [];
-            while ((match = COMMAND_REGEX.exec(messageContent)) !== null) {
-                newCommands.push({ type: match[1].toUpperCase(), params: match[2].trim() });
-            }
-            logger.info(`Found ${newCommands.length} command(s) in message ${lastAiIndex} to rerun.`);
-            const newState = await executeCommandPipeline(newCommands, initialState);
-            await updateVariablesWith(variables => {
-                _.set(variables, "SAM_data", goodCopy(newState));
-                return variables;
-            });
-            logger.info("Live variables updated with rerun state.");
-            const cleanNarrative = messageContent.replace(STATE_BLOCK_REMOVE_REGEX, '').trim();
-            const newStateBlock = `${STATE_BLOCK_START_MARKER}\n${JSON.stringify(newState, null, 2)}\n${STATE_BLOCK_END_MARKER}`;
-            const finalContent = `${cleanNarrative}\n\n${newStateBlock}`;
-            setChatMessages([{'message_id':lastAiIndex, 'message':finalContent}]);
-            logger.info(`Message at index ${lastAiIndex} permanently updated in chat history.`);
-            toastr.success("Rerun complete. State saved.");
-        } catch (error) {
-            logger.error("Manual rerun failed.", error);
-            toastr.error("Rerun failed. Check console for errors.");
-        } finally {
-            isProcessingState = false; // Release the lock
+            k.depsText.innerHTML = `
+                <div class="sam_dep_indicator" title="jsonrepair"><div class="sam_dep_dot ${jr}"></div></div>
+                <div class="sam_dep_indicator" title="MiniSearch"><div class="sam_dep_dot ${ms}"></div></div>
+                <div class="sam_dep_indicator" title="jsonpatch"><div class="sam_dep_dot ${jp}"></div></div>
+            `;
         }
     }
 
-    function displayLogs() {
-        logger.info("--- LOG DISPLAY TRIGGERED ---");
-        if (executionLog.length === 0) {
-            toastr.info("Execution log is empty.");
-            return;
-        }
-        const logText = executionLog.map(entry => `[${entry.timestamp}] [${entry.level}] ${entry.message}`).join('\n');
-        const blob = new Blob([logText], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `SAM_Execution_Log_${new Date().toISOString()}.txt`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        toastr.success("Log file download initiated.");
+    function clamp_max(val, min, max, defaultVal) {
+        const o = Number(val);
+        return Number.isFinite(o) ? Math.min(max, Math.max(min, o)) : defaultVal;
     }
 
-    $(() => {
-        cleanupPreviousInstance();
-        const initializeOrReloadStateForCurrentChat = async () => {
-            logger.info("Initializing or reloading state for current chat.");
-            const lastAiIndex = await findLastAiMessageAndIndex();
-            if (lastAiIndex === -1) {
-                logger.info("No AI messages found. Initializing with default state.");
-                await updateVariablesWith(variables => { _.set(variables, "SAM_data", _.cloneDeep(INITIAL_STATE)); return variables });
-            } else {
-                await loadStateFromMessage(lastAiIndex);
-            }
-            logger.info("Initialization finalized");
+    function Tn(leftTarget, topTarget, saveState) {
+        if (!k.widget) return;
+        const fabSize = UI_STATE.fabSizePx;
+        const width = UI_STATE.panelOpen ? (k.widget.offsetWidth || 800) : fabSize;
+        const height = UI_STATE.panelOpen ? (k.widget.offsetHeight || 600) : fabSize;
+        
+        const maxLeft = Math.max(8, y.innerWidth - width - 8);
+        const maxTop = Math.max(8, y.innerHeight - height - 8);
+        
+        const safeLeft = clamp_max(leftTarget, 8, maxLeft, 8);
+        const safeTop = clamp_max(topTarget, 8, maxTop, 8);
+        
+        k.widget.style.left = `${safeLeft}px`;
+        k.widget.style.top = `${safeTop}px`;
+        
+        if (saveState) { UI_STATE.uiLeft = safeLeft; UI_STATE.uiTop = safeTop; }
+    }
+
+    function An() { if (!k.widget) return; const rect = k.widget.getBoundingClientRect(); Tn(rect.left, rect.top, false); }
+    function En() { if (!k.widget) return; const rect = k.widget.getBoundingClientRect(); UI_STATE.uiLeft = rect.left; UI_STATE.uiTop = rect.top; }
+  
+    function Nn() {
+        if (!v.head) return;
+        if (v.getElementById(STYLE_ID)) v.getElementById(STYLE_ID).remove();
+        const styleNode = v.createElement("style");
+        styleNode.id = STYLE_ID;
+        styleNode.textContent = `
+          #${WIDGET_ID} { position: fixed; z-index: 99997; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+          #${WIDGET_ID} .th-asr-fab { width: 48px; height: 48px; border: none; border-radius: 14px; cursor: pointer; color: white; background: linear-gradient(135deg, #0f766e, #0f172a); box-shadow: 0 8px 20px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; touch-action: none; transition: transform 0.16s ease, box-shadow 0.16s ease; }
+          #${WIDGET_ID} .th-asr-fab:hover { transform: translateY(-1px) scale(1.02); box-shadow: 0 10px 24px rgba(0,0,0,0.5); }
+          #${WIDGET_ID} .th-asr-panel { margin-top: 10px; width: 95vw; height: 95vh; border-radius: 8px; background: #1e1e1e; border: 1px solid #333; box-shadow: 0 16px 36px rgba(0,0,0,0.6); display: flex; flex-direction: column; overflow: hidden; color: #ddd; }
+          #${WIDGET_ID} .th-asr-panel[hidden] { display: none !important; }
+          .sam_modal_header { background: #252526; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; cursor: move; border-bottom: 1px solid #333; user-select: none; touch-action: none; }
+          .sam_header_title { font-weight: bold; font-size: 14px; } .sam_brand { color: #4a6fa5; } .sam_version { font-size: 10px; color: #666; }
+          .sam_close_icon { background: none; border: none; color: #888; cursor: pointer; font-size: 16px; } .sam_close_icon:hover { color: #fff; }
+          .sam_tabs { display: flex; background: #2d2d2d; border-bottom: 1px solid #333; flex-shrink:0; }
+          .sam_tab { background: transparent; border: none; color: #888; padding: 10px 20px; cursor: pointer; font-size: 12px; border-right: 1px solid #333; transition: all 0.2s; }
+          .sam_tab:hover { background: #333; color: #ccc; } .sam_tab.active { background: #1e1e1e; color: #4a6fa5; font-weight: bold; border-top: 2px solid #4a6fa5; }
+          .sam_content_area { flex: 1; overflow:hidden; display:flex; flex-direction: column; }
+          .sam_content_area > * { flex: 1; overflow-y: auto; padding: 15px; box-sizing: border-box; }
+          .sam_modal_footer { height: 40px; background: #252526; border-top: 1px solid #333; display: flex; justify-content: space-between; align-items: center; padding: 0 15px; flex-shrink:0;}
+          .sam_deps_bar { display: flex; gap: 8px; margin-left: 15px; border-left: 1px solid #444; padding-left: 15px; }
+          .sam_dep_indicator { display: inline-flex; align-items: center; }
+          .sam_dep_dot { width: 8px; height: 8px; border-radius: 50%; }
+          .sam_dep_dot.green { background: #5cb85c; box-shadow: 0 0 4px #5cb85c; }
+          .sam_dep_dot.red { background: #d9534f; box-shadow: 0 0 4px #d9534f; }
+          .sam_status_bar { font-size: 11px; color: #666; } .sam_actions { display: flex; gap: 10px; }
+          .sam_btn { padding: 6px 14px; border: none; font-size: 12px; cursor: pointer; border-radius: 2px; }
+          .sam_btn_secondary { background: #3c3c3c; color: #ccc; } .sam_btn_secondary:hover { background: #4c4c4c; }
+          .sam_btn_primary { background: #0e639c; color: white; } .sam_btn_primary:hover { background: #1177bb; }
+          .sam_btn_small { background: #3c3c3c; border: none; color: white; width: 20px; height: 20px; cursor: pointer; border-radius: 3px; }
+          .sam_form_row { margin-bottom: 15px; } .sam_form_grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+          .sam_label { display: block; margin-bottom: 5px; font-size: 11px; color: #aaa; }
+          .sam_input, .sam_select { width: 100%; background: #2d2d2d; border: 1px solid #3e3e3e; color: white; padding: 6px; font-size: 12px; box-sizing: border-box; }
+          .sam_textarea { width: 100%; min-height: 80px; background: #151515; border: 1px solid #333; color: #ccc; font-family: monospace; padding: 10px; box-sizing: border-box; resize: vertical; }
+          .sam_code_editor { height: 100%; width: 100%; background: #151515; color: #dcdcaa; border: 1px solid #333; padding: 10px; font-family: 'Consolas', monospace; box-sizing: border-box; flex: 1; resize: none; }
+          .sam_split { display: flex; height: 100%; gap: 15px; overflow: hidden;}
+          .sam_sidebar { width: 220px; background: #252526; border: 1px solid #333; display: flex; flex-direction: column; flex-shrink:0; }
+          .sam_sidebar_header { padding: 10px; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items:center; font-size: 12px; font-weight: bold; }
+          .sam_list { list-style: none; padding: 0; margin: 0; overflow-y: auto; flex:1; }
+          .sam_list li { padding: 8px 10px; cursor: pointer; font-size: 12px; border-bottom: 1px solid #2a2a2a; display: flex; justify-content: space-between; }
+          .sam_list li:hover { background: #2a2a2a; } .sam_list li.active { background: #37373d; color: white; }
+          .sam_detail { flex: 1; overflow-y: auto; background: #1e1e1e; border: 1px solid #333; padding: 15px; box-sizing: border-box;}
+          .sam_delete_icon { color: #666; font-weight: bold; cursor:pointer; } .sam_delete_icon:hover { color: #f86c6b; }
+          .sam_toggle { cursor: pointer; display: inline-block; vertical-align: middle; }
+          .sam_toggle_track { width: 36px; height: 18px; background: #333; border-radius: 9px; position: relative; transition: background 0.2s; }
+          .sam_toggle_track.on { background: #4a6fa5; }
+          .sam_toggle_thumb { width: 14px; height: 14px; background: white; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: left 0.2s; }
+          .sam_toggle_track.on .sam_toggle_thumb { left: 20px; }
+          .sam_summary_display { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px; }
+          .sam_summary_box { background: #252526; border: 1px solid #333; padding: 10px; border-radius: 4px; display: flex; flex-direction: column; }
+          .sam_summary_box h4 { margin:0 0 10px 0; font-size: 12px; color:#888; border-bottom:1px solid #333; padding-bottom:5px; }
+          .sam_summary_box textarea { min-height: 120px; }
+        `;
+        v.head.appendChild(styleNode);
+    }
+  
+    function renderTabContent() {
+        if (!k.contentArea) return;
+        const T = UI_STATE.activeTab;
+        let html = '';
+  
+        if (T === 'SUMMARY') {
+            html = `<div>
+              <h3>分层摘要配置</h3>
+              <div class="sam_form_grid" style="grid-template-columns: 1fr 1fr 1fr;">
+                 <div class="sam_form_row"><label class="sam_label">L1 频率</label><input class="sam_input" type="number" id="sam_L1_freq" value="${samSettings.summary_levels.L1.frequency}"></div>
+                 <div class="sam_form_row"><label class="sam_label">L2 频率</label><input class="sam_input" type="number" id="sam_L2_freq" value="${samSettings.summary_levels.L2.frequency}"></div>
+                 <div class="sam_form_row"><label class="sam_label">L3 频率</label><input class="sam_input" type="number" id="sam_L3_freq" value="${samSettings.summary_levels.L3.frequency}"></div>
+              </div>
+              <div class="sam_form_row">
+                  <label class="sam_label" style="display:inline-block; margin-right: 10px;">启用 L2 摘要</label>
+                  <div class="sam_toggle" id="toggle_L2"><div class="sam_toggle_track ${samSettings.summary_levels.L2.enabled?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
+              </div>
+              <div class="sam_form_row">
+                  <label class="sam_label" style="display:inline-block; margin-right: 10px;">启用 L3 摘要</label>
+                  <div class="sam_toggle" id="toggle_L3"><div class="sam_toggle_track ${samSettings.summary_levels.L3.enabled?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
+              </div>
+              <div class="sam_form_row"><label class="sam_label">L2 生成提示词</label><textarea class="sam_textarea" id="sam_prompt_L2">${samSettings.summary_prompt}</textarea></div>
+              
+              
+              <div class="sam_form_row"><label class="sam_label">L3 生成提示词</label><textarea class="sam_textarea" id="sam_prompt_L3">${samSettings.summary_prompt_L3}</textarea></div>
+              
+              <div class="sam_actions">
+                  <button class="sam_btn sam_btn_primary" id="btn_save_summary">保存配置</button> 
+                  <button class="sam_btn sam_btn_secondary" id="btn_run_summary">一键批量总结</button>
+                  <button class="sam_btn sam_btn_secondary" id="btn_show_summary_prompt">查看下次提示词 (Debug)</button>
+              </div>
+              <div id="debug_prompt_container" style="display:none; margin-top:15px; background:#1a1a1a; padding:10px; border:1px dashed #555; border-radius:4px;">
+                  <label class="sam_label" style="color:#f0ad4e;">下次 L2 摘要提示词预览 (范围: <span id="debug_prompt_range"></span>)</label>
+                  <textarea class="sam_textarea" id="debug_prompt_area" readonly style="min-height:200px; background:#111; color:#ccc; margin-top:5px;"></textarea>
+              </div>
+
+              <hr style="border-color: #333; margin: 20px 0;">
+
+
+              <h3>已存档摘要</h3>
+              <div class="sam_summary_display">
+                  ${['L3', 'L2', 'L1'].map(level => `
+                    <div class="sam_summary_box">
+                      <h4>${level} 级摘要 (${(samData.responseSummary[level] ||[]).length})</h4>
+                      ${(samData.responseSummary[level] ||[]).map((s, i) => `
+                        <div style="margin-bottom:10px;">
+                          <div style="font-size:10px; color:#666; display:flex; justify-content:space-between;"><span>范围: ${s.index_begin}-${s.index_end}</span> <span class="sam_delete_icon" data-level="${level}" data-idx="${i}">×</span></div>
+                          <textarea class="sam_textarea" data-level="${level}" data-idx="${i}" style="min-height:80px;">${s.content}</textarea>
+                        </div>`).join('')}
+                    </div>
+                  `).join('')}
+              </div>
+              <div class="sam_actions" style="margin-top:20px;"><button class="sam_btn sam_btn_primary" id="btn_commit_data">保存所有摘要编辑</button></div>
+            </div>`;
+        } else if (T === 'CONNECTIONS') {
+            const presets = apiManager.getAllPresets();
+            const draft = presets[UI_STATE.selectedPresetIndex];
+            
+            html = `<div class="sam_split">
+                <div class="sam_sidebar">
+                    <div class="sam_sidebar_header"><span>API 预设</span><button class="sam_btn_small" id="btn_add_preset">+</button></div>
+                    <ul class="sam_list" id="preset_list">
+                        ${presets.map((p, i) => `<li data-idx="${i}" class="${i === UI_STATE.selectedPresetIndex ? 'active' : ''}">${p.name} ${samSettings.summary_api_preset === p.name?'(当前)':''} <span class="sam_delete_icon" data-idx="${i}">×</span></li>`).join('')}
+                    </ul>
+                </div>
+                <div class="sam_detail">
+                    ${draft ? `
+                        <div class="sam_form_row"><label class="sam_label">预设名称</label><input class="sam_input" id="preset_name" value="${draft.name}"></div>
+                        <div class="sam_form_row"><label class="sam_label">API 模式</label><select class="sam_select" id="preset_mode"><option value="custom" ${draft.apiMode==='custom'?'selected':''}>自定义连接</option><option value="tavern" ${draft.apiMode==='tavern'?'selected':''}>Tavern 主 API</option></select></div>
+                        ${draft.apiMode === 'custom' ? `
+                            <div class="sam_form_row"><label class="sam_label">源 (格式)</label><select class="sam_select" id="preset_source">${API_SOURCE_OPTIONS.map(opt => `<option value="${opt.value}" ${draft.apiConfig.source===opt.value?'selected':''}>${opt.label}</option>`).join('')}</select></div>
+                            <div class="sam_form_row"><label class="sam_label">URL</label><input class="sam_input" id="preset_url" value="${draft.apiConfig.url || ''}"></div>
+                            <div class="sam_form_grid">
+                                <div class="sam_form_row"><label class="sam_label">API Key</label><input type="password" class="sam_input" id="preset_key" value="${draft.apiConfig.apiKey || ''}"></div>
+                                <div class="sam_form_row"><label class="sam_label">Proxy Pwd</label><input type="password" class="sam_input" id="preset_pwd" value="${draft.apiConfig.proxyPassword || ''}"></div>
+                            </div>
+                            <div class="sam_form_row"><label class="sam_label">模型</label><input class="sam_input" id="preset_model" value="${draft.apiConfig.model || ''}"></div>
+                        ` : '<p style="color:#666; font-size:12px;">此模式将使用SillyTavern中当前配置的主AI设置。</p>'}
+                        <div class="sam_actions" style="margin-top:20px;">
+                            <button class="sam_btn sam_btn_primary" id="btn_save_preset">保存并应用更改</button>
+                            <button class="sam_btn sam_btn_secondary" id="btn_set_active_preset" ${samSettings.summary_api_preset === draft.name ?'disabled':''}>设为默认</button>
+                        </div>
+                    ` : '<div style="color:#555; text-align:center; padding-top:100px;">选择或添加预设</div>'}
+                </div>
+            </div>`;
+        } else if (T === 'FUNCS') {
+            const func = samFunctions[UI_STATE.selectedFuncIndex];
+            html = `<div class="sam_split">
+                <div class="sam_sidebar">
+                    <div class="sam_sidebar_header"><span>自定义函数</span><button class="sam_btn_small" id="btn_add_func">+</button></div>
+                    <ul class="sam_list" id="func_list">
+                        ${samFunctions.map((f, i) => `<li data-idx="${i}" class="${i === UI_STATE.selectedFuncIndex ? 'active' : ''}">${f.func_name} <span class="sam_delete_icon" data-idx="${i}">×</span></li>`).join('')}
+                    </ul>
+                    <div style="padding:10px; border-top:1px solid #333;"><button class="sam_btn sam_btn_primary" style="width:100%;" id="btn_save_funcs" ${!go_flag?'disabled':''}>保存函数至世界信息</button></div>
+                </div>
+                <div class="sam_detail">
+                    ${func ? `
+                       <div class="sam_form_row"><label class="sam_label">函数名</label><input class="sam_input" value="${func.func_name}" data-field="func_name"></div>
+                       <div class="sam_form_row"><label class="sam_label">参数 (逗号分隔)</label><input class="sam_input" value="${(func.func_params ||[]).join(', ')}" data-field="func_params"></div>
+                       <div class="sam_form_row" style="flex:1; display:flex; flex-direction:column;"><label class="sam_label">函数体 (JS)</label><textarea class="sam_code_editor" data-field="func_body">${func.func_body}</textarea></div>
+                       <div class="sam_form_grid">
+                           <div><label class="sam_label" style="display:inline-block; margin-right:10px;">周期执行</label><div class="sam_toggle" data-field="periodic"><div class="sam_toggle_track ${func.periodic?'on':''}"><div class="sam_toggle_thumb"></div></div></div></div>
+                           <div><label class="sam_label" style="display:inline-block; margin-right:10px;">网络访问</label><div class="sam_toggle" data-field="network_access"><div class="sam_toggle_track ${func.network_access?'on':''}"><div class="sam_toggle_thumb"></div></div></div></div>
+                       </div>
+                    ` : '<div style="color:#555; text-align:center; padding-top:100px;">选择或添加函数</div>'}
+                </div>
+            </div>`;
+        } else if (T === 'REGEX') {
+             const regex = (samSettings.regexes || [])[UI_STATE.selectedRegexIndex];
+             html = `<div class="sam_split">
+                <div class="sam_sidebar">
+                    <div class="sam_sidebar_header"><span>正则过滤器</span><button class="sam_btn_small" id="btn_add_regex">+</button></div>
+                    <ul class="sam_list" id="regex_list">
+                        ${(samSettings.regexes ||[]).map((r, i) => `<li data-idx="${i}" class="${i === UI_STATE.selectedRegexIndex ? 'active' : ''}">${r.name} <span class="sam_delete_icon" data-idx="${i}">×</span></li>`).join('')}
+                    </ul>
+                    <div style="padding:10px; border-top:1px solid #333;"><button class="sam_btn sam_btn_primary" style="width:100%;" id="btn_save_regexes">保存所有正则</button></div>
+                </div>
+                <div class="sam_detail">
+                    ${regex ? `
+                        <div class="sam_form_row"><label class="sam_label">名称</label><input class="sam_input" value="${regex.name}" data-field="name"></div>
+                        <div class="sam_form_row"><label class="sam_label">表达式 (不含 /.../g)</label><textarea class="sam_textarea" data-field="regex_body">${regex.regex_body}</textarea></div>
+                        <div><label class="sam_label" style="display:inline-block; margin-right:10px;">启用</label><div class="sam_toggle" data-field="enabled"><div class="sam_toggle_track ${regex.enabled?'on':''}"><div class="sam_toggle_thumb"></div></div></div></div>
+                    ` : '<div style="color:#555; text-align:center; padding-top:100px;">选择或添加正则表达式</div>'}
+                </div>
+            </div>`;
+        } else if (T === 'DATA') {
+            html = `<div style="display:flex; flex-direction:column; height:100%;">
+                <div class="sam_form_row" style="display:flex; justify-content:space-between; align-items:center; flex-shrink:0;">
+                    <label class="sam_label">当前状态 JSON (可直接编辑)</label>
+                    <button class="sam_btn sam_btn_primary" id="btn_commit_data" ${!go_flag?'disabled':''}>提交数据更改</button>
+                </div>
+                <textarea class="sam_code_editor" id="data_json_area" ${!go_flag?'disabled':''}>${JSON.stringify(samData, null, 2)}</textarea>
+            </div>`;
+        } else if (T === 'SETTINGS') {
+            html = `<div>
+               <h3 style="margin-top:0; border-bottom:1px solid #333; padding-bottom:5px;">全局设置</h3>
+               <div class="sam_form_row">
+                  <label class="sam_label" style="display:inline-block; margin-right:10px;">启用数据/摘要系统</label>
+                  <div class="sam_toggle" id="toggle_data"><div class="sam_toggle_track ${samSettings.data_enable?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
+              </div>
+              <div class="sam_form_row">
+                  <label class="sam_label" style="display:inline-block; margin-right:10px;">摘要生成时跳过世界信息</label>
+                  <div class="sam_toggle" id="toggle_skip"><div class="sam_toggle_track ${samSettings.skipWIAN_When_summarizing?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
+              </div>
+              <div class="sam_form_row">
+                  <label class="sam_label" style="display:inline-block; margin-right:10px;">启用自动检查点写入</label>
+                  <div class="sam_toggle" id="toggle_checkpoint"><div class="sam_toggle_track ${samSettings.enable_auto_checkpoint?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
+              </div>
+              <div class="sam_form_row"><label class="sam_label">检查点频率 (回合数)</label><input class="sam_input" type="number" id="sam_checkpoint_freq" value="${samSettings.auto_checkpoint_frequency}"></div>
+              <div class="sam_actions" style="margin-top:20px;"><button class="sam_btn sam_btn_primary" id="btn_save_global">保存全局设置</button></div>
+              <hr style="border-color: #333; margin: 20px 0;">
+              <h3>导入 / 导出</h3>
+              <p style="font-size:11px; color:#666;">保存或加载您的扩展设置（不含API预设）。</p>
+              <div class="sam_actions">
+                <button class="sam_btn sam_btn_secondary" id="btn_export">导出设置</button>
+                <input type="file" id="file_import" style="display:none;" accept=".json">
+                <button class="sam_btn sam_btn_secondary" id="btn_import">导入设置</button>
+              </div>
+            </div>`;
+        }
+        
+        k.contentArea.innerHTML = `<div>${html}</div>`;
+        bindPanelEvents();
+    }
+  
+    function bindPanelEvents() {
+        const C = k.contentArea.firstElementChild;
+        if (!C) return;
+        const T = UI_STATE.activeTab;
+
+        const commitDataFromUI = async () => {
+            if (!go_flag) { toastr.error("缺少标识符，无法写入。"); return; }
+            try {
+                const text = C.querySelector('#data_json_area')?.value;
+                if(text) {
+                    let parsed; 
+                    try { parsed = JSON.parse(text); } 
+                    catch(e) { 
+                        if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+                        if (local_jsonrepair) { parsed = JSON.parse(local_jsonrepair(text)); } 
+                        else { throw new Error("JSON invalid & jsonrepair fallback not available."); }
+                    }
+                    samData = parsed;
+                }
+                
+                C.querySelectorAll('.sam_summary_display textarea').forEach(area => {
+                    const {level, idx} = area.dataset;
+                    if (samData.responseSummary[level]?.[idx]) { samData.responseSummary[level][idx].content = area.value; }
+                });
+
+                await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
+                toastr.success("数据已更新至本地变量");
+            } catch(e) { toastr.error(`JSON解析或提交失败: ${e.message}`); }
         };
 
+        if (T === 'SUMMARY') {
+            C.querySelector('#toggle_L2').onclick = () => { samSettings.summary_levels.L2.enabled = !samSettings.summary_levels.L2.enabled; renderTabContent(); };
+            C.querySelector('#toggle_L3').onclick = () => { samSettings.summary_levels.L3.enabled = !samSettings.summary_levels.L3.enabled; renderTabContent(); };
+            C.querySelector('#btn_save_summary').onclick = () => {
+                samSettings.summary_levels.L1.frequency = parseInt(C.querySelector('#sam_L1_freq').value) || 20;
+                samSettings.summary_levels.L2.frequency = parseInt(C.querySelector('#sam_L2_freq').value) || 20;
+                samSettings.summary_levels.L3.frequency = parseInt(C.querySelector('#sam_L3_freq').value) || 5;
+                samSettings.summary_prompt = C.querySelector('#sam_prompt_L2').value;
+                samSettings.summary_prompt_L3 = C.querySelector('#sam_prompt_L3').value;
+                saveSamSettings(); toastr.success("摘要配置已保存");
+            };
+            C.querySelector('#btn_run_summary').onclick = async () => {
+                if(!go_flag || !samSettings.data_enable) { toastr.warning("摘要功能未激活。"); return; }
+                const chatLen = SillyTavern.getContext().chat.length;
+                curr_state = STATES.SUMMARIZING; updateUIStatus();
+                await processBatchSummarizationRun(chatLen, false);
+                curr_state = STATES.IDLE; updateUIStatus();
+            };
+            C.querySelector('#btn_show_summary_prompt').onclick = () => {
+                if(!go_flag || !samSettings.data_enable) { toastr.warning("摘要功能未激活。"); return; }
+                
+                const container = C.querySelector('#debug_prompt_container');
+                const area = C.querySelector('#debug_prompt_area');
+                const rangeSpan = C.querySelector('#debug_prompt_range');
+                
+                // 如果已经打开，则折叠关闭
+                if (container.style.display === 'block') {
+                    container.style.display = 'none';
+                    return;
+                }
+
+                // 模拟 generateSingleL2Summary 的取值逻辑
+                const chat = SillyTavern.getContext().chat;
+                const startIndex = samData.summary_progress || 0;
+                let endIndex = startIndex + samSettings.summary_levels.L2.frequency;
+                
+                rangeSpan.textContent = `${startIndex} - ${endIndex}`;
+
+                if (startIndex >= chat.length) {
+                    area.value = "没有待处理的摘要内容 (No pending content for summary).";
+                } else {
+                    const msgs = chat.slice(startIndex, endIndex);
+                    if (msgs.length === 0) {
+                        area.value = "待处理消息为空 (Pending messages empty).";
+                    } else {
+                        // 执行相同的消息清理过程
+                        const contentStr = msgs.map(m => {
+                            let processed = m.mes
+                                .replace(CHECKPOINT_STRIP_REGEX, '')
+                                .replace(OLD_STATE_REMOVE_REGEX, '')
+                                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
+                                .trim();
+                            samSettings.regexes.forEach(rx => { 
+                                if(rx.enabled && rx.regex_body) {
+                                    try { processed = processed.replace(new RegExp(rx.regex_body, 'g'), ''); } catch(e){} 
+                                }
+                            });
+                            return `${m.name}: ${processed}`;
+                        }).join('\n');
+
+                        // 获取数据库映射并注入宏
+                        const db_content = sam_db && sam_db.isInitialized ? Object.entries(sam_db.getAllMemosAsObject()).map(([k,v])=>`Key: ${k}\nContent: ${v}`).join('\n\n') : "无现有设定";
+                        const promptL2 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt, { db_content, chat_content: contentStr });
+                        
+                        area.value = promptL2;
+                    }
+                }
+                
+                container.style.display = 'block';
+            };
+            C.querySelectorAll('.sam_summary_display .sam_delete_icon').forEach(icon => {
+                icon.onclick = (e) => { const {level, idx} = e.target.dataset; samData.responseSummary[level].splice(idx, 1); renderTabContent(); };
+            });
+            C.querySelector('#btn_commit_data').onclick = commitDataFromUI;
+        }
+        else if (T === 'SETTINGS') {
+            C.querySelector('#toggle_data').onclick = () => { samSettings.data_enable = !samSettings.data_enable; renderTabContent(); };
+            C.querySelector('#toggle_skip').onclick = () => { samSettings.skipWIAN_When_summarizing = !samSettings.skipWIAN_When_summarizing; renderTabContent(); };
+            C.querySelector('#toggle_checkpoint').onclick = () => { samSettings.enable_auto_checkpoint = !samSettings.enable_auto_checkpoint; renderTabContent(); };
+            C.querySelector('#btn_save_global').onclick = () => { 
+                samSettings.auto_checkpoint_frequency = parseInt(C.querySelector('#sam_checkpoint_freq').value) || 20;
+                saveSamSettings(); toastr.success("设置已保存"); 
+            };
+            C.querySelector('#btn_export').onclick = () => {
+                const settingsToExport = _.cloneDeep(samSettings);
+                delete settingsToExport.api_presets;
+                const blob = new Blob([JSON.stringify(settingsToExport, null, 2)], {type:'application/json'});
+                const a = v.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'sam_settings.json'; a.click();
+            };
+            const fileInput = C.querySelector('#file_import');
+            C.querySelector('#btn_import').onclick = () => fileInput.click();
+            fileInput.onchange = (e) => {
+                const file = e.target.files[0]; if(!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    try {
+                        const newSettings = JSON.parse(ev.target.result); Object.assign(samSettings, newSettings);
+                        saveSamSettings(); toastr.success("设置已导入");
+                    } catch(err) { toastr.error("导入失败"); }
+                };
+                reader.readAsText(file);
+            };
+        }
+        else if (T === 'DATA') { C.querySelector('#btn_commit_data').onclick = commitDataFromUI; }
+        else if (T === 'CONNECTIONS' || T === 'FUNCS' || T === 'REGEX') {
+            const isFunc = T === 'FUNCS';
+            const isRegex = T === 'REGEX';
+            const sourceArr = isFunc ? samFunctions : (samSettings.regexes ||[]);
+            const selectedIdx = isFunc ? 'selectedFuncIndex' : 'selectedRegexIndex';
+            const addBtnId = isFunc ? 'btn_add_func' : 'btn_add_regex';
+            const saveBtnId = isFunc ? 'btn_save_funcs' : 'btn_save_regexes';
+            const listId = isFunc ? 'func_list' : 'regex_list';
+
+            if (isFunc || isRegex) {
+                C.querySelector(`#${addBtnId}`).onclick = () => {
+                    const newItem = isFunc ? { func_name: "新函数", func_params:[], func_body: "//..." } : { name: "新正则", regex_body: "", enabled: true };
+                    sourceArr.push(newItem);
+                    UI_STATE[selectedIdx] = sourceArr.length - 1;
+                    renderTabContent();
+                };
+                 C.querySelector(`#${saveBtnId}`).onclick = async () => {
+                    if(isFunc) await saveFunctionsToWI(samFunctions); else { samSettings.regexes = sourceArr; saveSamSettings(); toastr.success("正则表达式已保存"); }
+                };
+                C.querySelector(`#${listId}`).onclick = (e) => {
+                    const li = e.target.closest('li'); if(!li) return;
+                    const idx = parseInt(li.dataset.idx);
+                    if (e.target.classList.contains('sam_delete_icon')) { sourceArr.splice(idx, 1); if (UI_STATE[selectedIdx] === idx) UI_STATE[selectedIdx] = -1; } 
+                    else { UI_STATE[selectedIdx] = idx; }
+                    renderTabContent();
+                };
+                const detail = C.querySelector('.sam_detail');
+                if (detail && UI_STATE[selectedIdx] !== -1) {
+                    detail.oninput = (e) => {
+                        const field = e.target.dataset.field;
+                        if(field === "func_params") sourceArr[UI_STATE[selectedIdx]][field] = e.target.value.split(',').map(s=>s.trim());
+                        else sourceArr[UI_STATE[selectedIdx]][field] = e.target.value;
+                    };
+                    detail.onclick = (e) => {
+                        const toggle = e.target.closest('.sam_toggle');
+                        if (toggle) {
+                            const field = toggle.dataset.field;
+                            sourceArr[UI_STATE[selectedIdx]][field] = !sourceArr[UI_STATE[selectedIdx]][field];
+                            toggle.firstElementChild.classList.toggle('on');
+                        }
+                    };
+                }
+            } else { // Connections
+                C.querySelector('#preset_list').onclick = (e) => {
+                    const li = e.target.closest('li'); if(!li) return;
+                    const idx = parseInt(li.dataset.idx);
+                    if (e.target.classList.contains('sam_delete_icon')) {
+                        const presetName = apiManager.getAllPresets()[idx].name;
+                        apiManager.deletePreset(presetName);
+                        if(samSettings.summary_api_preset === presetName) samSettings.summary_api_preset = null;
+                        UI_STATE.selectedPresetIndex = -1;
+                    } else { UI_STATE.selectedPresetIndex = idx; }
+                    renderTabContent();
+                };
+                C.querySelector('#btn_add_preset').onclick = () => {
+                    apiManager.savePreset(`新预设 ${apiManager.getAllPresets().length + 1}`, { apiMode: 'custom', apiConfig: { source: 'custom' } });
+                    UI_STATE.selectedPresetIndex = apiManager.getAllPresets().length - 1;
+                    renderTabContent();
+                };
+                const detail = C.querySelector('.sam_detail');
+                if (detail && UI_STATE.selectedPresetIndex !== -1) {
+                    C.querySelector('#btn_save_preset').onclick = () => {
+                        const oldName = apiManager.getAllPresets()[UI_STATE.selectedPresetIndex].name;
+                        const newName = C.querySelector('#preset_name').value;
+                        const mode = C.querySelector('#preset_mode').value;
+                        let conf = { name: newName, apiMode: mode, apiConfig: {} };
+                        if (mode === 'custom') {
+                            conf.apiConfig = {
+                                source: C.querySelector('#preset_source').value, url: C.querySelector('#preset_url').value,
+                                apiKey: C.querySelector('#preset_key').value, proxyPassword: C.querySelector('#preset_pwd').value,
+                                model: C.querySelector('#preset_model').value
+                            };
+                        }
+                        if (oldName !== newName) apiManager.deletePreset(oldName);
+                        apiManager.savePreset(newName, conf);
+                        toastr.success("预设已保存");
+                    };
+                    C.querySelector('#btn_set_active_preset').onclick = () => {
+                        const name = apiManager.getAllPresets()[UI_STATE.selectedPresetIndex].name;
+                        samSettings.summary_api_preset = name;
+                        saveSamSettings(); toastr.success(`"${name}" 设为默认预设`);
+                    };
+                }
+            }
+        }
+    }
+  
+    function togglePanel(open, initial = false) {
+        if (!k.panel) return;
+        if (UI_STATE.panelOpen === open && !initial) return;
+        UI_STATE.panelOpen = open;
+        k.panel.hidden = !open;
+        if (open) { renderTabContent(); }
+        An();
+    }
+
+    function setupWatchdog() {
+        if (!v.body) return;
+        const WATCHDOG_ID = "sam-watchdog-script";
+        let wd = v.getElementById(WATCHDOG_ID);
+        if (wd) wd.remove();
+        
+        wd = v.createElement("script");
+        wd.id = WATCHDOG_ID;
+        wd.textContent = `
+            (function() {
+                var lastSeenBeat = -1;
+                var strikes = 0;
+                var checkInterval = setInterval(function() {
+                    var widget = document.getElementById('${WIDGET_ID}');
+                    if (!widget) { clearInterval(checkInterval); return; }
+                    
+                    var currentBeat = parseInt(widget.getAttribute('data-beat') || '0', 10);
+                    if (currentBeat > 0 && currentBeat === lastSeenBeat) {
+                        strikes++;
+                        if (strikes >= 2) {
+                            widget.remove();
+                            var s = document.getElementById('${STYLE_ID}'); if (s) s.remove();
+                            var self = document.getElementById('${WATCHDOG_ID}'); if (self) self.remove();
+                            clearInterval(checkInterval);
+                            console.log('[SAM Watchdog] 核心引擎已断开，失效悬浮窗已自动清理。');
+                        }
+                    } else { strikes = 0; lastSeenBeat = currentBeat; }
+                }, 2000);
+            })();
+        `;
+        v.body.appendChild(wd);
+        
+        let beatCount = 1;
+        if (k.widget) k.widget.setAttribute('data-beat', beatCount.toString());
+        const hb = setInterval(() => { if (k.widget) { beatCount++; k.widget.setAttribute('data-beat', beatCount.toString()); } }, 2000);
+        cleanup_pool.push(() => clearInterval(hb)); 
+    }
+
+    function sync_getVariables() {
+        let data = SillyTavern.getContext().variables.local.get("SAM_data");
+        if (!data || typeof data !== 'object') {
+            data = goodCopy(INITIAL_STATE);
+        } else {
+            _.defaultsDeep(data, INITIAL_STATE);
+        }
+        return data;
+    }
+
+    function serialize_memory() {
+    const data = sync_getVariables();
+    let allSummaries =[];
+
+    // Combine L2 and L3 summaries, adding a 'level' property to each
+    if (data.responseSummary && Array.isArray(data.responseSummary.L2)) {
+        allSummaries = allSummaries.concat(data.responseSummary.L2.map(summary => ({ ...summary, level: 'L2' })));
+    }
+    if (data.responseSummary && Array.isArray(data.responseSummary.L3)) {
+        allSummaries = allSummaries.concat(data.responseSummary.L3.map(summary => ({ ...summary, level: 'L3' })));
+    }
+
+    // Sort the combin
+    // ed array by the beginning of their range
+    allSummaries.sort((a, b) => a.index_begin - b.index_begin);
+
+    // Format the sorted summaries into strings
+    const serialized_memory_parts = allSummaries.map(summary => {
+        return `[${summary.level} Summary | Range: ${summary.index_begin}-${summary.index_end}]: ${summary.content}`;
+    });
+
+    return serialized_memory_parts.join('\n');
+    }
+
+    function buildWidgetHTML() {
+        try {
+            if (!v.body) return false;
+            if (v.getElementById(WIDGET_ID)) v.getElementById(WIDGET_ID).remove();
+            
+            const c = v.createElement("div"); c.id = WIDGET_ID;
+            c.innerHTML = `
+              <button class="th-asr-fab" title="${APP_NAME}">
+                <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>
+              </button>
+              <div class="th-asr-panel" hidden>
+                <div class="sam_modal_header">
+                  <div class="sam_header_title"><span class="sam_brand">SAM</span> 管理器 <span class="sam_version">v${SCRIPT_VERSION}</span></div>
+                  <button class="sam_close_icon" id="sam_btn_close">✕</button>
+                </div>
+                <div class="sam_tabs">
+                    <button class="sam_tab active" data-tab="SUMMARY">摘要</button>
+                    <button class="sam_tab" data-tab="CONNECTIONS">连接</button>
+                    <button class="sam_tab" data-tab="REGEX">正则</button>
+                    <button class="sam_tab" data-tab="DATA">数据</button>
+                    <button class="sam_tab" data-tab="FUNCS">函数</button>
+                    <button class="sam_tab" data-tab="SETTINGS">设置</button>
+                </div>
+                <div class="sam_content_area" id="sam_tab_content"></div>
+                <div class="sam_modal_footer">
+                    <div style="display: flex; align-items: center;">
+                        <div class="sam_status_bar" id="sam_status_display">初始化中...</div>
+                        <div class="sam_deps_bar" id="sam_deps_display"></div>
+                    </div>
+                    <div class="sam_actions"><button class="sam_btn sam_btn_secondary" id="sam_btn_refresh">重载数据</button></div>
+                </div>
+              </div>
+            `;
+            v.body.appendChild(c);
+            
+            k.widget = c; 
+            k.panel = c.querySelector(".th-asr-panel"); 
+            k.fab = c.querySelector(".th-asr-fab");
+            k.header = c.querySelector(".sam_modal_header");
+            k.contentArea = c.querySelector("#sam_tab_content"); 
+            k.statusText = c.querySelector("#sam_status_display");
+            k.depsText = c.querySelector("#sam_deps_display");
+            
+            if (!k.widget || !k.panel || !k.fab || !k.header) throw new Error("Missing Elements");
+            
+            add_event_listener(k.fab, "click", () => { if ("1" !== k.widget?.dataset?.dragging) { togglePanel(!UI_STATE.panelOpen); } });
+            add_event_listener(c.querySelector("#sam_btn_close"), "click", () => togglePanel(false));
+            add_event_listener(c.querySelector("#sam_btn_refresh"), async () => { await loadContextData(true); renderTabContent(); toastr.info("数据已重载"); });
+            
+            c.querySelectorAll('.sam_tab').forEach(tab => {
+                add_event_listener(tab, "click", (e) => {
+                    c.querySelectorAll('.sam_tab').forEach(t=>t.classList.remove('active'));
+                    tab.classList.add('active');
+                    UI_STATE.activeTab = tab.dataset.tab;
+                    renderTabContent();
+                });
+            });
+
+            (function () {
+                if (!k.widget || !k.fab || !k.header) return;
+                const dragState = { active: false, pointerId: null, startX: 0, startY: 0, originLeft: 0, originTop: 0, moved: false };
+                
+                function isInteractive(node) { return !!node && typeof node.closest === "function" && !!node.closest("button, input, select, textarea, label, a, .sam_toggle"); }
+    
+                function onPointerDown(n) {
+                    if ("mouse" === n.pointerType && 0 !== n.button) return;
+                    if (n.currentTarget === k.header && isInteractive(n.target)) return;
+                    
+                    const rect = k.widget.getBoundingClientRect();
+                    dragState.active = true; dragState.pointerId = Number.isFinite(n.pointerId) ? n.pointerId : null;
+                    dragState.startX = n.clientX; dragState.startY = n.clientY;
+                    dragState.originLeft = rect.left; dragState.originTop = rect.top;
+                    dragState.moved = false; k.widget.dataset.dragging = "0";
+                    
+                    if (typeof n.currentTarget?.setPointerCapture === "function" && null !== dragState.pointerId) { try { n.currentTarget.setPointerCapture(dragState.pointerId); } catch (err) {} }
+                    n.preventDefault();
+                }
+    
+                function onPointerMove(t) {
+                    if (!dragState.active) return;
+                    if (null !== dragState.pointerId && t.pointerId !== dragState.pointerId) return;
+                    const dx = t.clientX - dragState.startX; const dy = t.clientY - dragState.startY;
+                    if (Math.abs(dx) + Math.abs(dy) > 4) { dragState.moved = true; k.widget.dataset.dragging = "1"; }
+                    Tn(dragState.originLeft + dx, dragState.originTop + dy, false);
+                }
+    
+                function onPointerUp(t) {
+                    if (dragState.active) {
+                        if (null !== dragState.pointerId && t && Number.isFinite(t.pointerId) && t.pointerId !== dragState.pointerId) return;
+                        dragState.active = false; dragState.pointerId = null; En();
+                        setTimeout(() => { if (k.widget) k.widget.dataset.dragging = "0"; }, 0);
+                    }
+                }
+    
+                add_event_listener(k.fab, "pointerdown", onPointerDown);
+                add_event_listener(k.header, "pointerdown", onPointerDown);
+                add_event_listener(v, "pointermove", onPointerMove);
+                add_event_listener(v, "pointerup", onPointerUp);
+                add_event_listener(v, "pointercancel", onPointerUp);
+            })();
+            
+            togglePanel(UI_STATE.panelOpen, true);
+            if (null === UI_STATE.uiLeft || null === UI_STATE.uiTop) {
+                const fabSize = UI_STATE.fabSizePx; const padding = 16;
+                const defaultLeft = y.innerWidth - fabSize - padding;
+                const defaultTop = Math.max(padding, Math.min(y.innerHeight - fabSize - padding, 120));
+                Tn(defaultLeft, defaultTop, true);
+            } else { Tn(UI_STATE.uiLeft, UI_STATE.uiTop, true); }
+            add_event_listener(y, "resize", () => { An(); En(); });
+
+            setupWatchdog();
+
+            return true;
+        } catch (e) { logger.error("Widget creation failed:", e); return false; }
+    }
+    
+    // ========================================================================
+    // 9. 初始化与上下文加载
+    // ========================================================================
+    async function loadContextData(forceRebuild = false) {
+        await checkWorldInfoActivation();
+
+        if (!go_flag) {
+            logger.info("SAM identifier not found. Icon committing suicide.");
+            cleanupDOM();
+            return;
+        }
+
+        if (!k.widget) {
+            logger.info("SAM identifier found. Resurrecting icon.");
+            Nn();
+            if (!buildWidgetHTML()) { logger.error("Icon failed to resurrect."); return; }
+        }
+
+        loadSamSettings();
+        samFunctions = await getFunctionsFromWI();
+
+        if (forceRebuild) {
+            await sync_latest_state();
+        } else {
+            let d = SillyTavern.getContext().variables.local.get("SAM_data");
+            if (d && typeof d === 'object') {
+                _.defaultsDeep(d, INITIAL_STATE);
+                samData = d;
+            } else { await sync_latest_state(); }
+        }
+
+        await initializeDatabase(samData.jsondb);
+        updateUIStatus();
+    }
+
+    // Manual Event Triggers corresponding to custom UI Buttons
+    async function manualCheckpoint() {
+        if (isCheckpointing || isProcessingState || curr_state !== STATES.IDLE) return;
+        isCheckpointing = true;
+        try {
+            const chat = SillyTavern.getContext().chat;
+            let lastAiIndex = findLastAiMessageAndIndex();
+            if (lastAiIndex === -1) return;
+
+            const lastAiMessage = chat[lastAiIndex];
+            
+            // [RESTORED FROM V5] Explicit cleanup of old blocks first
+            const cleanNarrative = lastAiMessage.mes
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '')
+                .trim();
+
+            const stateString = await chunkedStringify(samData);
+            const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
+
+            chat[lastAiIndex].mes = finalContent;
+            await setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
+            toastr.success("手动检查点已创建 (Manual checkpoint created)");
+        } catch(e) {
+            logger.error("Manual checkpoint failed", e);
+            toastr.error("检查点创建失败");
+        } finally {
+            isCheckpointing = false;
+        }
+    }
+
+    async function manualReset() {
+        try {
+            await sync_latest_state();
+            toastr.success("SAM 内部状态已重置 (State reset)");
+        } catch(e) { logger.error("Manual reset failed", e); toastr.error("状态重置失败"); }
+    }
+
+    async function initSAM() {
+        if (typeof tavern_events === 'undefined') { logger.warn("Not in ST environment."); return; }
+
+        //[RESTORED FROM V5] Clean up any old running instances first
+        cleanupPreviousInstance();
+
+        loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+        loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
+
+        loadSamSettings();
+        apiManager = new APIManager({ initialPresets: samSettings.api_presets, onUpdate: (p) => { samSettings.api_presets = p; saveSamSettings(); } });
+
         eventMakeFirst(tavern_events.GENERATION_STARTED, handlers.handleGenerationStarted);
-        eventOn(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
-        eventOn(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
-        eventOn(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
-        eventOn(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
-        eventOn(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
-        eventOn(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
-        eventOn(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
+        bindTavernEvent(tavern_events.MESSAGE_SENT, handlers.handleMessageSent);
+        bindTavernEvent(tavern_events.GENERATION_ENDED, handlers.handleGenerationEnded);
+        bindTavernEvent(tavern_events.GENERATION_STOPPED, handlers.handleGenerationStopped);
+        bindTavernEvent(tavern_events.MESSAGE_SWIPED, handlers.handleMessageSwiped);
+        bindTavernEvent(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
+        bindTavernEvent(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
+        bindTavernEvent(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+
+        //[RESTORED FROM V5] Store new handlers for future cleanup
         window[HANDLER_STORAGE_KEY] = handlers;
 
         try {
-            const resetEvent = getButtonEvent("重置内部状态（慎用）");
-            const rerunLatestCommandsEvent = getButtonEvent("再次执行（慎用）");
-            const displayLogEvent = getButtonEvent("执行日志");
-            if (resetEvent) eventOn(resetEvent, resetCurrentState);
-            if (rerunLatestCommandsEvent) eventOn(rerunLatestCommandsEvent, rerunLatestCommands);
-            if (displayLogEvent) eventOn(displayLogEvent, displayLogs);
-        } catch (e) {
-            logger.warn("Could not find debug buttons. This is normal if they are not defined in the UI.", e);
-        }
+            if (typeof getButtonEvent === 'function' && typeof eventOn === 'function') {
+                const resetEvent = getButtonEvent("重置内部状态（慎用）");
+                const checkpointEvent = getButtonEvent("手动检查点");
+                if (resetEvent) eventOn(resetEvent, manualReset);
+                if (checkpointEvent) eventOn(checkpointEvent, manualCheckpoint);
+            }
+        } catch (e) {}
 
-        try{
-            const checkGenerationStatusEvent = getButtonEvent("确认运行")
-            if (checkGenerationStatusEvent) eventOn(
-                () => {
-                    alert(`Stuck state resolver visibility (is-generating) status == ${$('#mes_stop').is(':visible')}`);
-                }
-            );
-        }catch(e){}
+        await loadContextData(true);
+        SillyTavern.getContext().registerMacro('SAM_serialized_memory', serialize_memory);
+        SillyTavern.getContext().registerMacro('SAM_serialized_db', serialize_db);
 
-        try {
-            logger.info(`V3.5.0 "Momentum" loaded. GLHF, player.`);
-            initializeOrReloadStateForCurrentChat();
-            session_id = JSON.stringify(new Date());
-            sessionStorage.setItem(SESSION_STORAGE_KEY, session_id);
-            logger.info(`Assigned new session ID: ${session_id}`);
-        } catch (error) {
-            logger.error("Error during final initialization:", error);
-        }
-    });
+        logger.info(`SAM Core Engine V${SCRIPT_VERSION} fully loaded.`);
+    }
 
-})()
+    const startup = () => { initSAM(); };
+
+    if (v.readyState === "loading") { add_event_listener(v, "DOMContentLoaded", startup, { once: true }); }
+    else { startup(); }
+
+  })());
