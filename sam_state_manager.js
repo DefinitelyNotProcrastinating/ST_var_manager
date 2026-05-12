@@ -479,21 +479,23 @@ $((() => {
 
     async function saveFunctionsToWI(functions) {
         if (!go_flag) { toastr.error("无法保存: 世界信息中未找到SAM标识符。"); return; }
-        const characterWIName = await TavernHelper.getCurrentCharPrimaryLorebook();
+        const characterId = SillyTavern.getContext().characterId;
+        if (characterId === null || characterId < 0) { toastr.error("此角色没有关联的世界信息文件。"); return; }
+        const characterWIName = SillyTavern.getContext().characters[characterId]?.data?.extensions?.world;
         if (!characterWIName) { toastr.error("此角色没有关联的世界信息文件。"); return; }
 
         try {
-            let wi = await SillyTavern.getContext().loadWorldInfo(characterWIName);
-            const entryKey = _.findKey(wi.entries, (entry) => entry.comment === SAM_FUNCTIONLIB_ID);
+            const worldbook = await getWorldbook(characterWIName);
+            const entryKey = _.findKey(worldbook, (entry) => entry.name.includes(SAM_FUNCTIONLIB_ID));
             const content = JSON.stringify(functions, null, 2);
 
-            if (entryKey) {
-                wi.entries[entryKey].content = content;
-                await TavernHelper.updateWorldInfo(characterWIName, wi);
+            if (entryKey !== undefined) {
+                worldbook[entryKey].content = content;
+                await replaceWorldbook(characterWIName, worldbook);
+                toastr.success("函数已成功保存至世界信息。");
             } else {
                 toastr.warning("未找到SAM函数库条目，请先在世界信息中手动创建一个comment为'__SAM_IDENTIFIER__'的条目。");
             }
-            toastr.success("函数已成功保存至世界信息。");
         } catch (e) { console.error(e); toastr.error("保存函数至世界信息失败。"); }
     }
 
