@@ -275,10 +275,13 @@ $((() => {
             if (existingIndex >= 0) this.presets[existingIndex] = presetData; else this.presets.push(presetData);
             this._notifyUpdate(); return true;
         }
-        deletePreset(name) {
+        deletePreset(name, notify = true) {
             const initLen = this.presets.length;
             this.presets = this.presets.filter(p => p.name !== name);
-            if (this.presets.length !== initLen) { this._notifyUpdate(); return true; }
+            if (this.presets.length !== initLen) {
+                if (notify) this._notifyUpdate();
+                return true;
+            }
             return false;
         }
         getPreset(name) { return this.presets.find(p => p.name === name); }
@@ -1640,7 +1643,7 @@ $((() => {
                                 model: C.querySelector('#preset_model').value
                             };
                         }
-                        if (oldName !== newName) apiManager.deletePreset(oldName);
+                        if (oldName !== newName) apiManager.deletePreset(oldName, false);
                         apiManager.savePreset(newName, conf);
                         toastr.success("预设已保存");
                     };
