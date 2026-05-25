@@ -808,6 +808,8 @@ $((() => {
         await checkWorldInfoActivation();
         if (!go_flag || !samSettings.data_enable) return;
 
+        if (!samSettings.summary_levels.L2.enabled) return;
+
         const period = samSettings.summary_levels.L2.frequency;
         const last_progress = samData.summary_progress || 0;
         const last_failed = samData.summary_failed_progress || -1;
@@ -827,6 +829,17 @@ $((() => {
                 samData.summary_failed_progress = -1;
             }
             
+            // Persist summary tracking variables by updating the checkpoint
+            const chat = SillyTavern.getContext().chat;
+            let lastAiIndex = findLastAiMessageAndIndex();
+            if (lastAiIndex !== -1) {
+                let cleanNarrative = chat[lastAiIndex].mes.replace(CHECKPOINT_STRIP_REGEX, '').replace(OLD_STATE_REMOVE_REGEX, '').trim();
+                const stateString = await chunkedStringify(samData);
+                const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
+                chat[lastAiIndex].mes = finalContent;
+                await setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
+            }
+
             curr_state = STATES.IDLE; updateUIStatus();
         }
     }
@@ -1497,6 +1510,17 @@ $((() => {
                 const chatLen = SillyTavern.getContext().chat.length;
                 curr_state = STATES.SUMMARIZING; updateUIStatus();
                 await processBatchSummarizationRun(chatLen, false);
+                
+                const chat = SillyTavern.getContext().chat;
+                let lastAiIndex = findLastAiMessageAndIndex();
+                if (lastAiIndex !== -1) {
+                    let cleanNarrative = chat[lastAiIndex].mes.replace(CHECKPOINT_STRIP_REGEX, '').replace(OLD_STATE_REMOVE_REGEX, '').trim();
+                    const stateString = await chunkedStringify(samData);
+                    const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
+                    chat[lastAiIndex].mes = finalContent;
+                    await setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
+                }
+                
                 curr_state = STATES.IDLE; updateUIStatus();
             };
             C.querySelector('#btn_show_summary_prompt').onclick = () => {
