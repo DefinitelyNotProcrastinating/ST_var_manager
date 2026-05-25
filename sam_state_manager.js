@@ -1462,7 +1462,22 @@ $((() => {
                 });
 
                 await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
-                toastr.success("数据已更新至本地变量");
+                
+                const chat = SillyTavern.getContext().chat;
+                let lastAiIndex = findLastAiMessageAndIndex();
+                if (lastAiIndex !== -1) {
+                    const lastAiMessage = chat[lastAiIndex];
+                    let cleanNarrative = lastAiMessage.mes
+                        .replace(CHECKPOINT_STRIP_REGEX, '')
+                        .replace(OLD_STATE_REMOVE_REGEX, '')
+                        .trim();
+                    const stateString = await chunkedStringify(samData);
+                    const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
+                    chat[lastAiIndex].mes = finalContent;
+                    await setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
+                }
+
+                toastr.success("数据已更新至本地变量并写入最新回复");
             } catch(e) { toastr.error(`JSON解析或提交失败: ${e.message}`); }
         };
 
