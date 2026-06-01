@@ -11,14 +11,15 @@ $((() => {
 
     const SCRIPT_VERSION = "6.2.11 'Lone star'"; 
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
-    const MINISEARCH_URL = "https://cdn.jsdelivr.net/npm/minisearch@6.3.0/dist/umd/index.min.js";
-
     //[RESTORED FROM V5] Key for cleaning up old instances on script reload
     const HANDLER_STORAGE_KEY = `__SAM_V6_EVENT_HANDLER_STORAGE__`;
 
     // Local module references to replace global window dependencies
     let local_jsonrepair = null;
-    let local_MiniSearch = null;
+    const sam_db = {
+        isInitialized: true,
+        getAllMemosAsObject: () => ({ static_state: getSerializedStaticState() })
+    };
 
     // Regex to find and extract content from <JSONPatch> blocks.
     const UPDATE_BLOCK_EXTRACT_REGEX = /<JSONPatch>([\s\S]*?)<\/JSONPatch>/gim;
@@ -43,7 +44,6 @@ $((() => {
         responseSummary: { L1:[], L2:[], L3:[] },
         summary_progress: 0,
         summary_failed_progress: -1,
-        jsondb: null,
         func:[], events:[], event_counter: 0
     };
 
@@ -76,14 +76,12 @@ $((() => {
     // Default Settings
     const DEFAULT_SETTINGS = {
         data_enable: true,
-        enable_auto_checkpoint: true,
-        auto_checkpoint_frequency: 20,
         summary_api_preset: null,
         api_presets:[],
         summary_levels: {
-            L1: { enabled: false, frequency: 20 },
-            L2: { enabled: true, frequency: 20 },
-            L3: { enabled: true, frequency: 5 }
+            L1: { frequency: 20 },
+            L2: { frequency: 20 },
+            L3: { frequency: 5 }
         },
         skipWIAN_When_summarizing: false,
         regexes:[],
@@ -159,7 +157,6 @@ $((() => {
     let samData = goodCopy(INITIAL_STATE);
     let samFunctions =[];
 
-    let sam_db = null;
     let apiManager = null;
 
     let UI_STATE = {
@@ -187,70 +184,7 @@ $((() => {
     }
 
     // ========================================================================
-    // 4. SAMDatabase 类封装 (No changes needed)
-    // ========================================================================
-    class SAMDatabase {
-        constructor({ enabled = true } = {}) {
-            this.isEnabled = enabled;
-            this.miniSearch = null;
-            this.documentMap = new Map();
-            this.isInitialized = false;
-            this.miniSearchConfig = { fields:['key', 'keywords'], storeFields: ['key'], idField: 'key' };
-        }
-        async init() {
-            if (!this.isEnabled || this.isInitialized) return this.isInitialized;
-            try {
-                if (!local_MiniSearch) await loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
-                if (local_MiniSearch) {
-                    this.miniSearch = new local_MiniSearch(this.miniSearchConfig);
-                    this.isInitialized = true;
-                    return true;
-                } else {
-                    logger.warn("DB init skipped: MiniSearch library not available.");
-                    this.isEnabled = false;
-                    return false;
-                }
-            } catch (error) { logger.warn("DB init failed.", error); this.isEnabled = false; return false; }
-        }
-        _checkReady() { return this.isEnabled && this.isInitialized; }
-        setMemo(key, content, keywords =[]) {
-            if (!this._checkReady()) return;
-            const doc = { key: key, keywords:[key, ...keywords].join(' ').toLowerCase() };
-            if (this.miniSearch.has(key)) this.miniSearch.remove({ key });
-            this.miniSearch.add(doc);
-            this.documentMap.set(key, content);
-        }
-        searchMemos(query) {
-            if (!this._checkReady()) return[];
-            return this.miniSearch.search(query.toLowerCase()).map(res => ({ key: res.key, content: this.documentMap.get(res.key) }));
-        }
-        deleteMemo(key) {
-            if (!this._checkReady()) return;
-            if (this.miniSearch.has(key)) { this.miniSearch.remove({ key }); this.documentMap.delete(key); }
-        }
-        getAllMemosAsObject() {
-            if (!this._checkReady()) return {};
-            return Object.fromEntries(this.documentMap.entries());
-        }
-        export() {
-            if (!this._checkReady()) return null;
-            return JSON.stringify({ miniSearchIndex: this.miniSearch.toJSON(), documentMap: Object.fromEntries(this.documentMap.entries()) });
-        }
-        import(jsonString) {
-            if (!this.isEnabled) return false;
-            try {
-                const data = JSON.parse(jsonString);
-                if (!local_MiniSearch || typeof local_MiniSearch.loadJSON !== 'function') throw new Error("MiniSearch not fully loaded.");
-                this.miniSearch = local_MiniSearch.loadJSON(JSON.stringify(data.miniSearchIndex), this.miniSearchConfig);
-                this.documentMap = new Map(Object.entries(data.documentMap));
-                this.isInitialized = true;
-                return true;
-            } catch (error) { logger.warn("DB import failed.", error); return false; }
-        }
-    }
-
-    // ========================================================================
-    // 5. APIManager 类封装 (No changes needed)
+    // 4. APIManager 类封装 (No changes needed)
     // ========================================================================
     class APIManager {
         constructor({ initialPresets =[], onUpdate = () => {} }) {
@@ -386,7 +320,6 @@ $((() => {
 
     async function loadExternalLibrary(url, libName) {
         if (libName === 'jsonrepair' && local_jsonrepair) return true;
-        if (libName === 'MiniSearch' && local_MiniSearch) return true;
 
         if (_loadingLibraries[url]) return await _loadingLibraries[url];
 
@@ -409,7 +342,6 @@ $((() => {
                 }
 
                 if (libName === 'jsonrepair') local_jsonrepair = exported;
-                if (libName === 'MiniSearch') local_MiniSearch = exported;
 
                 logger.info(`Library ${libName} loaded successfully.`);
                 updateUIStatus();
@@ -502,21 +434,12 @@ $((() => {
         } catch (e) { console.error(e); toastr.error("保存函数至世界信息失败。"); }
     }
 
-    async function initializeDatabase(dbStateJson = null) {
-        if (!sam_db) sam_db = new SAMDatabase({ enabled: true });
-        await sam_db.init();
-        if (dbStateJson) {
-            try { sam_db.import(dbStateJson); } catch(e){}
-        }
-    }
     function serialize_db() {
-        if (sam_db && sam_db.isInitialized) {
-            const allMemos = sam_db.getAllMemosAsObject(); // Assuming this is synchronous
-            if (allMemos && Object.keys(allMemos).length > 0) {
-                return Object.entries(allMemos).map(([k, v]) => `Key: ${k}\nContent: ${v}`).join('\n\n');
-            }
+        const staticData = samData?.static;
+        if (!staticData || (typeof staticData === 'object' && Object.keys(staticData).length === 0)) {
+            return "尚未储存任何设定。";
         }
-        return "尚未储存任何设定。";
+        return JSON.stringify(staticData, null, 2);
     }
 
     async function runSandboxedFunction(funcName, params, state) {
@@ -716,13 +639,6 @@ $((() => {
         let rebuiltState = goodCopy(INITIAL_STATE);
         let checkpointIndex = -1;
 
-        if (samData) {
-            rebuiltState.jsondb = samData.jsondb;
-            rebuiltState.responseSummary = _.cloneDeep(samData.responseSummary);
-            rebuiltState.summary_progress = samData.summary_progress;
-            rebuiltState.summary_failed_progress = samData.summary_failed_progress || -1;
-        }
-
         // 1. Trace BACKWARDS to find the latest Checkpoint
         for (let i = targetIndex; i >= 0; i--) {
             const msg = chat[i];
@@ -800,54 +716,51 @@ $((() => {
         if (UI_STATE.panelOpen) { renderTabContent(); }
     }
 
-    // ========================================================================
-    // 7. 自动总结 (Auto-Summary) & 数据写入流程
-    // ========================================================================
-    
-    async function triggerSummaryCheck(currentIndex) {
-        await checkWorldInfoActivation();
-        if (!go_flag || !samSettings.data_enable) return;
-
-        if (!samSettings.summary_levels.L2.enabled) return;
-
-        const period = samSettings.summary_levels.L2.frequency;
-        const last_progress = samData.summary_progress || 0;
-        const last_failed = samData.summary_failed_progress || -1;
-        
-        const effective_baseline = Math.max(last_progress, last_failed);
-
-        if (currentIndex - effective_baseline >= period) {
-            logger.info(`Summary threshold reached (${currentIndex - effective_baseline}/${period}).`);
-            curr_state = STATES.SUMMARIZING; updateUIStatus();
-            
-            const oldProgress = samData.summary_progress;
-            await processBatchSummarizationRun(currentIndex, false);
-            
-            if (samData.summary_progress === oldProgress) {
-                samData.summary_failed_progress = currentIndex;
-            } else {
-                samData.summary_failed_progress = -1;
-            }
-            
-            // Persist summary tracking variables by updating the checkpoint
-            const chat = SillyTavern.getContext().chat;
-            let lastAiIndex = findLastAiMessageAndIndex();
-            if (lastAiIndex !== -1) {
-                let cleanNarrative = chat[lastAiIndex].mes.replace(CHECKPOINT_STRIP_REGEX, '').replace(OLD_STATE_REMOVE_REGEX, '').trim();
-                const stateString = await chunkedStringify(samData);
-                const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
-                chat[lastAiIndex].mes = finalContent;
-                await setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
-            }
-
-            curr_state = STATES.IDLE; updateUIStatus();
+    function getSerializedStaticState() {
+        const staticData = samData?.static;
+        if (!staticData || (typeof staticData === 'object' && Object.keys(staticData).length === 0)) {
+            return "无现有设定";
         }
+        return JSON.stringify(staticData, null, 2);
     }
 
+    function getCleanChatSlice(startIndex, endIndex) {
+        const chat = SillyTavern.getContext().chat;
+        const msgs = chat.slice(startIndex, endIndex);
+        if (msgs.length === 0) return [];
+        return msgs.map(m => {
+            let processed = m.mes
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '')
+                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
+                .trim();
+            samSettings.regexes.forEach(rx => {
+                if (rx.enabled && rx.regex_body) {
+                    try { processed = processed.replace(new RegExp(rx.regex_body, 'g'), ''); } catch (e) {}
+                }
+            });
+            return { ...m, cleanedMes: processed };
+        });
+    }
+
+    async function persistSamStateToLatestMessage() {
+        const chat = SillyTavern.getContext().chat;
+        let lastAiIndex = findLastAiMessageAndIndex();
+        if (lastAiIndex === -1) return;
+
+        let cleanNarrative = chat[lastAiIndex].mes.replace(CHECKPOINT_STRIP_REGEX, '').replace(OLD_STATE_REMOVE_REGEX, '').trim();
+        const stateString = await chunkedStringify(samData);
+        const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
+        chat[lastAiIndex].mes = finalContent;
+        await setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
+    }
+
+    // ========================================================================
+    // 7. 手动总结 (Manual Summary) & 数据写入流程
+    // ========================================================================
+    
     async function checkAndGenerateL3Summaries() {
         const l3Set = samSettings.summary_levels.L3;
-        if (!l3Set.enabled) return;
-
         while (samData.responseSummary.L2.length >= l3Set.frequency) {
             const toCondense = samData.responseSummary.L2.slice(0, l3Set.frequency);
             const l3Str = toCondense.map(s => `[Messages ${s.index_begin}-${s.index_end}]: ${s.content}`).join('\n');
@@ -858,7 +771,13 @@ $((() => {
                 const resultL3 = (samSettings.summary_api_preset && apiManager) ? await apiManager.generate([{ role: 'user', content: pL3 }], samSettings.summary_api_preset)
                                 : await SillyTavern.getContext().generateQuietPrompt({ quietPrompt: pL3, skipWIAN: samSettings.skipWIAN_When_summarizing });
                 if (resultL3) {
-                    samData.responseSummary.L3.push({ index_begin: toCondense[0].index_begin, index_end: toCondense[toCondense.length-1].index_end, content: resultL3, level: 0 });
+                    samData.responseSummary.L3.push({
+                        index_begin: toCondense[0].index_begin,
+                        index_end: toCondense[toCondense.length - 1].index_end,
+                        content: resultL3,
+                        level: 0,
+                        source_items: _.cloneDeep(toCondense),
+                    });
                     samData.responseSummary.L2.splice(0, l3Set.frequency);
                 } else {
                     break;
@@ -878,20 +797,11 @@ $((() => {
             samData.responseSummary.L2 = samData.responseSummary.L2.filter(s => s.index_begin >= endIndex || s.index_end <= startIndex); 
         }
 
-        const msgs = chat.slice(startIndex, endIndex);
+        const msgs = getCleanChatSlice(startIndex, endIndex);
         if (msgs.length === 0) return false;
 
-        const contentStr = msgs.map(m => {
-            let processed = m.mes
-                .replace(CHECKPOINT_STRIP_REGEX, '')
-                .replace(OLD_STATE_REMOVE_REGEX, '')
-                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
-                .trim();
-            samSettings.regexes.forEach(rx => { if(rx.enabled && rx.regex_body) try { processed = processed.replace(new RegExp(rx.regex_body, 'g'), ''); }catch(e){} });
-            return `${m.name}: ${processed}`;
-        }).join('\n');
-
-        const db_content = sam_db && sam_db.isInitialized ? Object.entries(sam_db.getAllMemosAsObject()).map(([k,v])=>`Key: ${k}\nContent: ${v}`).join('\n\n') : "无现有设定";
+        const contentStr = msgs.map(m => `${m.name}: ${m.cleanedMes}`).join('\n');
+        const db_content = getSerializedStaticState();
         const promptL2 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt, { db_content, chat_content: contentStr });
 
         let resultL2;
@@ -909,19 +819,11 @@ $((() => {
 
         if (!resultL2) return false;
 
-        const dbOperations = await extractOperationsFromText(resultL2);
-        for (const op of dbOperations) {
-            if (op.op === 'insert' && op.path && op.value && typeof op.value.content === 'string') {
-                const pathParts = op.path.split('/');
-                const key = pathParts[pathParts.length - 1];
-                if (key) { sam_db.setMemo(key, op.value.content, Array.isArray(op.value.keywords) ? op.value.keywords :[]); }
-            }
-        }
-
         const cleanL2 = resultL2.replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim();
 
         if (cleanL2) {
             samData.responseSummary.L2.push({ index_begin: startIndex, index_end: endIndex, content: cleanL2, level: 0 });
+            samData.responseSummary.L2.sort((a, b) => a.index_begin - b.index_begin);
             return true;
         }
         return false;
@@ -949,12 +851,89 @@ $((() => {
         }
         
         if (anySuccess) {
-            if (sam_db.isInitialized) samData.jsondb = sam_db.export();
             await applyDataToChat(samData);
             if (typeof toastr !== 'undefined') toastr.success("[SAM] 批量摘要生成完成");
             if (UI_STATE.panelOpen) renderTabContent();
         }
         return anySuccess;
+    }
+
+    async function runManualSummaries() {
+        if(!go_flag || !samSettings.data_enable) {
+            toastr.warning("摘要功能未激活。");
+            return;
+        }
+
+        const chatLen = SillyTavern.getContext().chat.length;
+        const l2Freq = Math.max(1, parseInt(samSettings.summary_levels?.L2?.frequency, 10) || 20);
+        const pendingCount = chatLen - (samData.summary_progress || 0);
+        if (pendingCount < l2Freq) {
+            toastr.info(`[SAM] 暂无达到 L2 阈值的未总结聊天。当前待处理消息数: ${Math.max(0, pendingCount)}`);
+            return;
+        }
+
+        curr_state = STATES.SUMMARIZING;
+        updateUIStatus();
+        try {
+            await processBatchSummarizationRun(chatLen, false);
+            await persistSamStateToLatestMessage();
+        } finally {
+            curr_state = STATES.IDLE;
+            updateUIStatus();
+        }
+    }
+
+    async function rewriteSummaryItem(level, idx) {
+        if(!go_flag || !samSettings.data_enable) {
+            toastr.warning("摘要功能未激活。");
+            return;
+        }
+
+        const summary = samData?.responseSummary?.[level]?.[idx];
+        if (!summary) return;
+
+        curr_state = STATES.SUMMARIZING;
+        updateUIStatus();
+        try {
+            if (level === 'L2') {
+                const success = await generateSingleL2Summary(summary.index_begin, summary.index_end, true);
+                if (!success) throw new Error("L2 重写失败");
+            } else if (level === 'L3') {
+                const sourceItems = Array.isArray(summary.source_items) && summary.source_items.length
+                    ? summary.source_items
+                    : (samData.responseSummary.L2 || []).filter(item => item.index_begin >= summary.index_begin && item.index_end <= summary.index_end);
+
+                let summaryContent = '';
+                if (sourceItems.length) {
+                    summaryContent = sourceItems.map(s => `[Messages ${s.index_begin}-${s.index_end}]: ${s.content}`).join('\n');
+                } else {
+                    const fallbackMessages = getCleanChatSlice(summary.index_begin, summary.index_end);
+                    summaryContent = fallbackMessages.map(m => `${m.name}: ${m.cleanedMes}`).join('\n');
+                }
+
+                const promptL3 = SillyTavern.getContext().substituteParamsExtended(samSettings.summary_prompt_L3, { summary_content: summaryContent });
+                const resultL3 = (samSettings.summary_api_preset && apiManager)
+                    ? await apiManager.generate([{ role: 'user', content: promptL3 }], samSettings.summary_api_preset)
+                    : await SillyTavern.getContext().generateQuietPrompt({ quietPrompt: promptL3, skipWIAN: samSettings.skipWIAN_When_summarizing });
+
+                if (!resultL3) throw new Error("L3 重写失败");
+                samData.responseSummary.L3[idx] = { ...summary, content: resultL3, source_items: _.cloneDeep(sourceItems) };
+            } else {
+                toastr.info("当前仅支持重写 L2 和 L3 摘要。");
+                return;
+            }
+
+            await applyDataToChat(samData);
+            await persistSamStateToLatestMessage();
+            if (UI_STATE.panelOpen) renderTabContent();
+            toastr.success(`${level} 摘要已重写`);
+        } catch (e) {
+            logger.error(`Rewrite ${level} summary failed`, e);
+            toastr.error(`${level} 摘要重写失败: ${e.message}`);
+        } finally {
+            curr_state = STATES.IDLE;
+            updateUIStatus();
+        }
     }
 
     async function processMessageState(index) {
@@ -1018,16 +997,6 @@ $((() => {
             }
 
             cleanNarrative = cleanNarrative.trim();
-
-            const currentRound = chat.filter(m => !m.is_user).length;
-            const shouldCheckpoint = samSettings.enable_auto_checkpoint &&
-                                     samSettings.auto_checkpoint_frequency > 0 &&
-                                     (currentRound > 0 && (currentRound % samSettings.auto_checkpoint_frequency === 0 || index === 0));
-
-            if (shouldCheckpoint) {
-                const stateString = await chunkedStringify(samData);
-                cleanNarrative += `\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
-            }
 
             chat[index].mes = cleanNarrative;
             await setChatMessages([{ message_id: index, message: cleanNarrative }]);
@@ -1111,7 +1080,6 @@ $((() => {
                             
                             const chatLen = SillyTavern.getContext().chat.length;
                             await processMessageState(chatLen - 1);
-                            await triggerSummaryCheck(chatLen);
                             
                             curr_state = STATES.IDLE;
                             prevState = null; // Clear snapshot properly
@@ -1191,12 +1159,10 @@ $((() => {
         }
         if (k.depsText) {
             const jr = local_jsonrepair ? 'green' : 'red';
-            const ms = local_MiniSearch ? 'green' : 'red';
             const jp = 'green';
 
             k.depsText.innerHTML = `
                 <div class="sam_dep_indicator" title="jsonrepair"><div class="sam_dep_dot ${jr}"></div></div>
-                <div class="sam_dep_indicator" title="MiniSearch"><div class="sam_dep_dot ${ms}"></div></div>
                 <div class="sam_dep_indicator" title="jsonpatch"><div class="sam_dep_dot ${jp}"></div></div>
             `;
         }
@@ -1312,7 +1278,7 @@ $((() => {
               
               <div class="sam_actions">
                   <button class="sam_btn sam_btn_primary" id="btn_save_summary">保存配置</button> 
-                  <button class="sam_btn sam_btn_secondary" id="btn_run_summary">一键批量总结</button>
+                  <button class="sam_btn sam_btn_secondary" id="btn_run_summary">手动总结未总结聊天</button>
                   <button class="sam_btn sam_btn_secondary" id="btn_show_summary_prompt">查看下次提示词 (Debug)</button>
               </div>
               <div id="debug_prompt_container" style="display:none; margin-top:15px; background:#1a1a1a; padding:10px; border:1px dashed #555; border-radius:4px;">
@@ -1331,6 +1297,7 @@ $((() => {
                       ${(samData.responseSummary[level] ||[]).map((s, i) => `
                         <div style="margin-bottom:10px;">
                           <div style="font-size:10px; color:#666; display:flex; justify-content:space-between;"><span>范围: ${s.index_begin}-${s.index_end}</span> <span class="sam_delete_icon" data-level="${level}" data-idx="${i}">×</span></div>
+                          ${(level === 'L2' || level === 'L3') ? `<div style="display:flex; justify-content:flex-end; margin:6px 0;"><button class="sam_btn_small sam_rewrite_summary" data-level="${level}" data-idx="${i}">重写总结</button></div>` : ''}
                           <textarea class="sam_textarea" data-level="${level}" data-idx="${i}" style="min-height:80px;">${s.content}</textarea>
                         </div>`).join('')}
                     </div>
@@ -1428,11 +1395,6 @@ $((() => {
                   <label class="sam_label" style="display:inline-block; margin-right:10px;">摘要生成时跳过世界信息</label>
                   <div class="sam_toggle" id="toggle_skip"><div class="sam_toggle_track ${samSettings.skipWIAN_When_summarizing?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
               </div>
-              <div class="sam_form_row">
-                  <label class="sam_label" style="display:inline-block; margin-right:10px;">启用自动检查点写入</label>
-                  <div class="sam_toggle" id="toggle_checkpoint"><div class="sam_toggle_track ${samSettings.enable_auto_checkpoint?'on':''}"><div class="sam_toggle_thumb"></div></div></div>
-              </div>
-              <div class="sam_form_row"><label class="sam_label">检查点频率 (回合数)</label><input class="sam_input" type="number" id="sam_checkpoint_freq" value="${samSettings.auto_checkpoint_frequency}"></div>
               <div class="sam_actions" style="margin-top:20px;"><button class="sam_btn sam_btn_primary" id="btn_save_global">保存全局设置</button></div>
               <hr style="border-color: #333; margin: 20px 0;">
               <h3>导入 / 导出</h3>
@@ -1495,8 +1457,8 @@ $((() => {
         };
 
         if (T === 'SUMMARY') {
-            C.querySelector('#toggle_L2').onclick = () => { samSettings.summary_levels.L2.enabled = !samSettings.summary_levels.L2.enabled; renderTabContent(); };
-            C.querySelector('#toggle_L3').onclick = () => { samSettings.summary_levels.L3.enabled = !samSettings.summary_levels.L3.enabled; renderTabContent(); };
+            C.querySelector('#toggle_L2')?.closest('.sam_form_row')?.remove();
+            C.querySelector('#toggle_L3')?.closest('.sam_form_row')?.remove();
             C.querySelector('#btn_save_summary').onclick = () => {
                 samSettings.summary_levels.L1.frequency = parseInt(C.querySelector('#sam_L1_freq').value) || 20;
                 samSettings.summary_levels.L2.frequency = parseInt(C.querySelector('#sam_L2_freq').value) || 20;
@@ -1523,6 +1485,7 @@ $((() => {
                 
                 curr_state = STATES.IDLE; updateUIStatus();
             };
+            C.querySelector('#btn_run_summary').onclick = runManualSummaries;
             C.querySelector('#btn_show_summary_prompt').onclick = () => {
                 if(!go_flag || !samSettings.data_enable) { toastr.warning("摘要功能未激活。"); return; }
                 
@@ -1575,6 +1538,12 @@ $((() => {
                 
                 container.style.display = 'block';
             };
+            C.querySelectorAll('.sam_rewrite_summary').forEach(button => {
+                button.onclick = async (e) => {
+                    const { level, idx } = e.currentTarget.dataset;
+                    await rewriteSummaryItem(level, parseInt(idx, 10));
+                };
+            });
             C.querySelectorAll('.sam_summary_display .sam_delete_icon').forEach(icon => {
                 icon.onclick = (e) => { const {level, idx} = e.target.dataset; samData.responseSummary[level].splice(idx, 1); renderTabContent(); };
             });
@@ -1924,7 +1893,6 @@ $((() => {
             } else { await sync_latest_state(); }
         }
 
-        await initializeDatabase(samData.jsondb);
         updateUIStatus();
     }
 
@@ -1973,7 +1941,6 @@ $((() => {
         cleanupPreviousInstance();
 
         loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-        loadExternalLibrary(MINISEARCH_URL, 'MiniSearch');
 
         loadSamSettings();
         apiManager = new APIManager({ initialPresets: samSettings.api_presets, onUpdate: (p) => { samSettings.api_presets = p; saveSamSettings(); } });
