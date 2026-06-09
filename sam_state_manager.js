@@ -9,7 +9,7 @@ $((() => {
     const WIDGET_ID = "sam-core-widget-root";
     const APP_NAME = "SAM 核心管理器";
 
-    const SCRIPT_VERSION = "6.2.11 'Lone star'"; 
+    const SCRIPT_VERSION = "6.2.12 'Lone star'"; 
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     //[RESTORED FROM V5] Key for cleaning up old instances on script reload
     const HANDLER_STORAGE_KEY = `__SAM_V6_EVENT_HANDLER_STORAGE__`;
@@ -360,6 +360,249 @@ $((() => {
 
     function goodCopy(state) { return _.cloneDeep(state || INITIAL_STATE); }
 
+    function isPlainObject(value) {
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+    }
+
+    function getValueComplexityScore(value) {
+        if (Array.isArray(value)) {
+            return value.reduce((sum, item) => sum + getValueComplexityScore(item), 1 + value.length);
+        }
+        if (isPlainObject(value)) {
+            return Object.entries(value).reduce((sum, [key, item]) => sum + String(key).length + getValueComplexityScore(item), 2 + Object.keys(value).length * 2);
+        }
+        if (typeof value === 'string') return value.length;
+        if (typeof value === 'number') return Number.isFinite(value) ? Math.abs(value) : 0;
+        if (typeof value === 'boolean') return 1;
+        return 0;
+    }
+
+    function detectIdentityKeyForArray(items) {
+        const candidates = ['name', 'func_name', 'id', 'key', 'title'];
+        for (const candidate of candidates) {
+            const count = items.filter(item => isPlainObject(item) && (typeof item[candidate] === 'string' || typeof item[candidate] === 'number')).length;
+            if (count >= 2) return candidate;
+        }
+        return null;
+    }
+
+    function choosePreferredValue(existingValue, incomingValue) {
+        if (existingValue === undefined) return incomingValue;
+        if (incomingValue === undefined) return existingValue;
+        if (_.isEqual(existingValue, incomingValue)) return existingValue;
+
+        if (Array.isArray(existingValue) && Array.isArray(incomingValue)) {
+            return normalizeJsonTree([...existingValue, ...incomingValue]);
+        }
+
+        if (isPlainObject(existingValue) && isPlainObject(incomingValue)) {
+            const merged = {};
+            const allKeys = new Set([...Object.keys(existingValue), ...Object.keys(incomingValue)]);
+            for (const key of allKeys) {
+                merged[key] = choosePreferredValue(existingValue[key], incomingValue[key]);
+            }
+            return normalizeJsonTree(merged);
+        }
+
+        if (isPlainObject(existingValue) || isPlainObject(incomingValue)) {
+            return getValueComplexityScore(incomingValue) >= getValueComplexityScore(existingValue) ? incomingValue : existingValue;
+        }
+
+        if (Array.isArray(existingValue) || Array.isArray(incomingValue)) {
+            return getValueComplexityScore(incomingValue) >= getValueComplexityScore(existingValue) ? incomingValue : existingValue;
+        }
+
+        return incomingValue;
+    }
+
+    function normalizeJsonTree(value) {
+        if (Array.isArray(value)) {
+            const normalizedItems = value.map(item => normalizeJsonTree(item));
+            const identityKey = detectIdentityKeyForArray(normalizedItems);
+            if (!identityKey) return normalizedItems;
+
+            const deduped = [];
+            const indexByIdentity = new Map();
+            for (const item of normalizedItems) {
+                if (!isPlainObject(item) || (typeof item[identityKey] !== 'string' && typeof item[identityKey] !== 'number')) {
+                    deduped.push(item);
+                    continue;
+                }
+
+                const identity = `${identityKey}:${String(item[identityKey])}`;
+                if (!indexByIdentity.has(identity)) {
+                    indexByIdentity.set(identity, deduped.length);
+                    deduped.push(item);
+                    continue;
+                }
+
+                const existingIndex = indexByIdentity.get(identity);
+                deduped[existingIndex] = choosePreferredValue(deduped[existingIndex], item);
+            }
+            return deduped;
+        }
+
+        if (isPlainObject(value)) {
+            const normalizedObject = {};
+            for (const [key, item] of Object.entries(value)) {
+                normalizedObject[key] = normalizeJsonTree(item);
+            }
+            return normalizedObject;
+        }
+
+        return value;
+    }
+
+    function scanJsonStringLiteral(source, startIndex) {
+        if (source[startIndex] !== '"') throw new Error('Expected string literal.');
+        let i = startIndex + 1;
+        while (i < source.length) {
+            if (source[i] === '\\') { i += 2; continue; }
+            if (source[i] === '"') return i + 1;
+            i += 1;
+        }
+        throw new Error('Unterminated string literal.');
+    }
+
+    function scanJsonValueEnd(source, startIndex, closingChar) {
+        const firstChar = source[startIndex];
+        if (firstChar === '{' || firstChar === '[') {
+            let depthBraces = 0;
+            let depthBrackets = 0;
+            let inString = false;
+
+            for (let i = startIndex; i < source.length; i++) {
+                const char = source[i];
+                if (inString) {
+                    if (char === '\\') { i += 1; continue; }
+                    if (char === '"') inString = false;
+                    continue;
+                }
+
+                if (char === '"') { inString = true; continue; }
+                if (char === '{') { depthBraces += 1; continue; }
+                if (char === '[') { depthBrackets += 1; continue; }
+                if (char === '}') {
+                    depthBraces -= 1;
+                    if (depthBraces === 0 && depthBrackets === 0 && firstChar === '{') return i + 1;
+                    continue;
+                }
+                if (char === ']') {
+                    depthBrackets -= 1;
+                    if (depthBraces === 0 && depthBrackets === 0 && firstChar === '[') return i + 1;
+                }
+            }
+            return source.length;
+        }
+
+        let depthBraces = 0;
+        let depthBrackets = 0;
+        let inString = false;
+
+        for (let i = startIndex; i < source.length; i++) {
+            const char = source[i];
+            if (inString) {
+                if (char === '\\') { i += 1; continue; }
+                if (char === '"') inString = false;
+                continue;
+            }
+
+            if (char === '"') { inString = true; continue; }
+            if (char === '{') { depthBraces += 1; continue; }
+            if (char === '}') {
+                if (depthBraces === 0 && depthBrackets === 0 && closingChar === '}') return i;
+                depthBraces -= 1;
+                continue;
+            }
+            if (char === '[') { depthBrackets += 1; continue; }
+            if (char === ']') {
+                if (depthBraces === 0 && depthBrackets === 0 && closingChar === ']') return i;
+                depthBrackets -= 1;
+                continue;
+            }
+            if (depthBraces === 0 && depthBrackets === 0 && (char === ',' || char === closingChar)) {
+                return i;
+            }
+        }
+
+        return source.length;
+    }
+
+    function parseJsonWithDuplicateResolution(text) {
+        const trimmed = String(text || '').trim();
+        if (!trimmed) return null;
+
+        if (trimmed[0] === '{') {
+            const result = {};
+            let index = 1;
+            while (index < trimmed.length - 1) {
+                while (index < trimmed.length && /[\s,]/.test(trimmed[index])) index += 1;
+                if (index >= trimmed.length - 1 || trimmed[index] === '}') break;
+
+                const keyEnd = scanJsonStringLiteral(trimmed, index);
+                const key = JSON.parse(trimmed.slice(index, keyEnd));
+                index = keyEnd;
+
+                while (index < trimmed.length && /\s/.test(trimmed[index])) index += 1;
+                if (trimmed[index] !== ':') throw new Error(`Invalid JSON object near key "${key}".`);
+                index += 1;
+                while (index < trimmed.length && /\s/.test(trimmed[index])) index += 1;
+
+                const valueEnd = scanJsonValueEnd(trimmed, index, '}');
+                const rawValue = trimmed.slice(index, valueEnd).trim();
+                const parsedValue = parseJsonWithDuplicateResolution(rawValue);
+                result[key] = Object.prototype.hasOwnProperty.call(result, key)
+                    ? choosePreferredValue(result[key], parsedValue)
+                    : parsedValue;
+
+                index = valueEnd;
+                if (trimmed[index] === ',') index += 1;
+            }
+            return normalizeJsonTree(result);
+        }
+
+        if (trimmed[0] === '[') {
+            const result = [];
+            let index = 1;
+            while (index < trimmed.length - 1) {
+                while (index < trimmed.length && /[\s,]/.test(trimmed[index])) index += 1;
+                if (index >= trimmed.length - 1 || trimmed[index] === ']') break;
+
+                const valueEnd = scanJsonValueEnd(trimmed, index, ']');
+                const rawValue = trimmed.slice(index, valueEnd).trim();
+                result.push(parseJsonWithDuplicateResolution(rawValue));
+
+                index = valueEnd;
+                if (trimmed[index] === ',') index += 1;
+            }
+            return normalizeJsonTree(result);
+        }
+
+        return JSON.parse(trimmed);
+    }
+
+    async function parseJsonSafelyWithNormalization(text) {
+        let textToParse = text;
+        try {
+            return parseJsonWithDuplicateResolution(textToParse);
+        } catch (firstError) {
+            if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
+            if (!local_jsonrepair) throw firstError;
+            textToParse = local_jsonrepair(text);
+            return parseJsonWithDuplicateResolution(textToParse);
+        }
+    }
+
+    function normalizeSamState(state) {
+        const normalizedState = _.merge({}, INITIAL_STATE, isPlainObject(state) ? state : {});
+        normalizedState.static = normalizeJsonTree(normalizedState.static);
+        normalizedState.volatile = normalizeJsonTree(Array.isArray(normalizedState.volatile) ? normalizedState.volatile : []);
+        normalizedState.func = normalizeJsonTree(Array.isArray(normalizedState.func) ? normalizedState.func : []);
+        normalizedState.events = normalizeJsonTree(Array.isArray(normalizedState.events) ? normalizedState.events : []);
+        normalizedState.responseSummary = normalizeJsonTree(normalizedState.responseSummary || { L1:[], L2:[], L3:[] });
+        return normalizedState;
+    }
+
     function loadSamSettings() {
         const { extensionSettings } = SillyTavern.getContext();
         if (!extensionSettings[MODULE_NAME]) extensionSettings[MODULE_NAME] = structuredClone(DEFAULT_SETTINGS);
@@ -408,7 +651,7 @@ $((() => {
             if (!worldInfoName) return null;
             const wiData = await SillyTavern.getContext().loadWorldInfo(worldInfoName);
             const baseDataEntry = Object.values(wiData?.entries || {}).find(e => e.comment === SAM_BASEDATA_ID);
-            return baseDataEntry && baseDataEntry.content ? JSON.parse(baseDataEntry.content) : null;
+            return baseDataEntry && baseDataEntry.content ? normalizeJsonTree(await parseJsonSafelyWithNormalization(baseDataEntry.content)) : null;
         } catch (e) { return null; }
     }
 
@@ -523,8 +766,9 @@ $((() => {
                     if (typeof pathStr === 'string') {
                         const pathKeys = parseJsonPointer(pathStr);
 
-                        // skip readonly vars
-                        if (pathKeys.length > 0 && pathKeys[0].startsWith('_')) {
+                        // Skip readonly derived fields such as /主角/_等级.
+                        const leafKey = pathKeys.length > 0 ? String(pathKeys[pathKeys.length - 1]) : '';
+                        if (leafKey.startsWith('_')) {
                             logger.warn(`Skipping operation on read-only variable: ${pathStr}`);
                             continue;
                         }
@@ -607,6 +851,12 @@ $((() => {
                 }
             } catch(e) { logger.error(`Failed to apply operation:`, op, e); }
         }
+        const beforeNormalization = isLiveGeneration ? goodCopy(state.static) : null;
+        state = normalizeSamState(state);
+        if (isLiveGeneration && beforeNormalization) {
+            const normalizationDiffs = generateJSONPatch(beforeNormalization, state.static);
+            if (normalizationDiffs && normalizationDiffs.length > 0) { generatedDiffs.push(...normalizationDiffs); }
+        }
         return { state, generatedDiffs };
     }
 
@@ -619,11 +869,7 @@ $((() => {
             if (!content) continue;
             if (!content.startsWith('[') && !content.endsWith(']')) { content = `[${content}]`; }
             try {
-                if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                let textToParse = content;
-                if (local_jsonrepair) { try { textToParse = local_jsonrepair(content); } catch (e) {} }
-
-                const parsedData = JSON.parse(textToParse);
+                const parsedData = await parseJsonSafelyWithNormalization(content);
                 if (Array.isArray(parsedData)) operations.push(...parsedData);
                 else if (typeof parsedData === 'object' && parsedData !== null) operations.push(parsedData);
             } catch (e) {
@@ -647,8 +893,8 @@ $((() => {
             const v6Match = msg.mes.match(CHECKPOINT_REGEX);
             if (v6Match && v6Match[1]) {
                 try {
-                    const parsed = JSON.parse(v6Match[1].trim());
-                    rebuiltState = _.merge({}, rebuiltState, parsed);
+                    const parsed = await parseJsonSafelyWithNormalization(v6Match[1].trim());
+                    rebuiltState = normalizeSamState(choosePreferredValue(rebuiltState, parsed));
                     checkpointIndex = i;
                     break;
                 } catch (e) {}
@@ -657,8 +903,8 @@ $((() => {
             const v5Match = msg.mes.match(OLD_STATE_PARSE_REGEX);
             if (v5Match && v5Match[1]) {
                 try {
-                    const parsed = JSON.parse(v5Match[1].trim());
-                    rebuiltState = _.merge({}, rebuiltState, parsed);
+                    const parsed = await parseJsonSafelyWithNormalization(v5Match[1].trim());
+                    rebuiltState = normalizeSamState(choosePreferredValue(rebuiltState, parsed));
                     checkpointIndex = i;
                     break;
                 } catch (e) {}
@@ -668,7 +914,7 @@ $((() => {
         // 2. Load Base Data if no checkpoint found
         if (checkpointIndex === -1 && targetIndex >= 0) {
             const baseData = await getBaseDataFromWI();
-            if (baseData) rebuiltState.static = _.merge({}, rebuiltState.static, baseData);
+            if (baseData) rebuiltState.static = normalizeJsonTree(choosePreferredValue(rebuiltState.static, baseData));
         }
 
         // 3. Trace FORWARD from the checkpoint
@@ -685,7 +931,7 @@ $((() => {
                 rebuiltState = state;
             }
         }
-        return rebuiltState;
+        return normalizeSamState(rebuiltState);
     }
 
     // [RESTORED FROM V5] Exact memory caching logic
@@ -699,13 +945,13 @@ $((() => {
         
         if (targetIndex === 0) {
             const baseData = await getBaseDataFromWI();
-            if (baseData) { state.static = _.merge({}, state.static, baseData); }
+            if (baseData) { state.static = normalizeJsonTree(choosePreferredValue(state.static, baseData)); }
         }
         
-        samData = state; 
-        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(state)); return variables });
+        samData = normalizeSamState(state); 
+        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
         updateUIStatus();
-        return state;
+        return samData;
     }
 
     // [RESTORED FROM V5] The explicit sync function
@@ -748,6 +994,7 @@ $((() => {
         let lastAiIndex = findLastAiMessageAndIndex();
         if (lastAiIndex === -1) return;
 
+        samData = normalizeSamState(samData);
         let cleanNarrative = chat[lastAiIndex].mes.replace(CHECKPOINT_STRIP_REGEX, '').replace(OLD_STATE_REMOVE_REGEX, '').trim();
         const stateString = await chunkedStringify(samData);
         const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
@@ -957,10 +1204,10 @@ $((() => {
             const periodicOps = samFunctions.filter(f => f.periodic).map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
 
             const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state, true);
-            samData = newState;
+            samData = normalizeSamState(newState);
             
             //[RESTORED FROM V5] Immediately push updated variable memory
-            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(newState)); return variables });
+            await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
 
             // Build the new block HTML if needed
             let newBlockHTML = "";
@@ -1013,7 +1260,9 @@ $((() => {
     }
 
     async function applyDataToChat(data) {
-        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(data)); return variables });
+        const normalizedData = normalizeSamState(data);
+        samData = normalizedData;
+        await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(normalizedData)); return variables });
         
         await setChatMessages([{"message_id": SillyTavern.getContext().chat.length - 1},
             {"message_id": SillyTavern.getContext().chat.length - 2}
@@ -1421,14 +1670,7 @@ $((() => {
             try {
                 const text = C.querySelector('#data_json_area')?.value;
                 if(text) {
-                    let parsed; 
-                    try { parsed = JSON.parse(text); } 
-                    catch(e) { 
-                        if (!local_jsonrepair) await loadExternalLibrary(JSON_REPAIR_URL, 'jsonrepair');
-                        if (local_jsonrepair) { parsed = JSON.parse(local_jsonrepair(text)); } 
-                        else { throw new Error("JSON invalid & jsonrepair fallback not available."); }
-                    }
-                    samData = parsed;
+                    samData = normalizeSamState(await parseJsonSafelyWithNormalization(text));
                 }
                 
                 C.querySelectorAll('.sam_summary_display textarea').forEach(area => {
@@ -1436,6 +1678,7 @@ $((() => {
                     if (samData.responseSummary[level]?.[idx]) { samData.responseSummary[level][idx].content = area.value; }
                 });
 
+                samData = normalizeSamState(samData);
                 await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
                 
                 const chat = SillyTavern.getContext().chat;
