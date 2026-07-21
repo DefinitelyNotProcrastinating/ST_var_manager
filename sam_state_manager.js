@@ -6,10 +6,10 @@ $((() => {
     // ========================================================================
     const INSTANCE_KEY = "__sam_core_widget_v6__";
     const STYLE_ID = "sam-core-widget-style";
-    const WIDGET_ID = "sam-core-widget-root";
+    const WIDGET_ID = "sam-core-widget-root"; 
     const APP_NAME = "SAM 核心管理器";
 
-    const SCRIPT_VERSION = "6.2.12 'Lone star'"; 
+    const SCRIPT_VERSION = "6.2.13 'Lone star'";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     //[RESTORED FROM V5] Key for cleaning up old instances on script reload
     const HANDLER_STORAGE_KEY = `__SAM_V6_EVENT_HANDLER_STORAGE__`;
@@ -85,7 +85,7 @@ $((() => {
         },
         skipWIAN_When_summarizing: false,
         regexes:[],
-        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用我们扩展的 JSON Patch 格式，并包裹在 <JSONPatch> 标签内。支持的op包含: replace, remove, delta, insert, inc, mul, push, addToSet, pull, pop, min, max, move。例如:\n<JSONPatch>\n[\n  { "op": "delta", "path": "/gold", "value": 10 }\n]\n</JSONPatch>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <JSONPatch> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
+        summary_prompt: `请仔细审查下方提供的聊天记录和现有设定。你的任务包含两部分，并需严格按照指定格式输出：\n\n1. **L2摘要**: 将“新内容”合并成一段连贯的摘要。在摘要中，每个对应原始消息的事件都必须在其句首注明编号。\n2. **插入指令**: 对比“新内容”和“现有设定”。只为在“现有设定”中不存在的关键信息生成插入指令。指令必须使用我们扩展的 JSON Patch 格式，并包裹在 <JSONPatch> 标签内。支持的op包含: replace, forced_set, remove, delta, insert, inc, mul, push, addToSet, pull, pop, min, max, move。其中 forced_set 用于强制设置以下划线开头的内部变量。例如:\n<JSONPatch>\n[\n  { "op": "delta", "path": "/gold", "value": 10 }\n]\n</JSONPatch>\n\n**最终输出格式要求：**\n必须先输出完整的L2摘要，然后另起一行输出所有的 <JSONPatch> 块。\n---\n现有设定:\n{{db_content}}\n---\n新内容:\n{{chat_content}}\n---`,
         summary_prompt_L3: `You are a summarization expert. Review the following list of sequential event summaries (L2 summaries). Your task is to condense them into a single, high-level narrative paragraph (an L3 summary). Focus on the most significant developments.\n\n---\n**Summaries to Condense:**\n{{summary_content}}\n---`
     };
 
@@ -761,14 +761,14 @@ $((() => {
         for (const op of operations) {
             if (!op || !op.op) continue;
             try {
-                if (['replace', 'remove', 'inc', 'mul', 'push', 'addToSet', 'pull', 'pop', 'min', 'max', 'move', 'insert', 'delta'].includes(op.op)) {
+                if (['replace', 'forced_set', 'remove', 'inc', 'mul', 'push', 'addToSet', 'pull', 'pop', 'min', 'max', 'move', 'insert', 'delta'].includes(op.op)) {
                     let pathStr = op.path !== undefined ? op.path : op.from;
                     if (typeof pathStr === 'string') {
                         const pathKeys = parseJsonPointer(pathStr);
 
                         // Skip readonly derived fields such as /主角/_等级.
                         const leafKey = pathKeys.length > 0 ? String(pathKeys[pathKeys.length - 1]) : '';
-                        if (leafKey.startsWith('_')) {
+                        if (leafKey.startsWith('_') && op.op !== 'forced_set') {
                             logger.warn(`Skipping operation on read-only variable: ${pathStr}`);
                             continue;
                         }
@@ -788,7 +788,7 @@ $((() => {
                                     parentVal.push(op.value);
                                 } else { _.set(state.static, pathKeys, op.value); }
                                 break;
-                            case 'replace': _.set(state.static, pathKeys, op.value); break;
+                            case 'replace': case 'forced_set': _.set(state.static, pathKeys, op.value); break;
                             case 'remove': _.unset(state.static, pathKeys); break;
                             case 'delta': case 'inc': _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) + (Number(op.value) || 0)); break;
                             case 'mul': _.set(state.static, pathKeys, (typeof currentVal === 'number' ? currentVal : 0) * (Number(op.value) || 1)); break;
