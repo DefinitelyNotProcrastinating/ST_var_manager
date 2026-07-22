@@ -9,7 +9,7 @@ $((() => {
     const WIDGET_ID = "sam-core-widget-root"; 
     const APP_NAME = "SAM 核心管理器";
 
-    const SCRIPT_VERSION = "6.2.13 'Lone star'";
+    const SCRIPT_VERSION = "6.2.14 'Lone star'";
     const JSON_REPAIR_URL = "https://cdn.jsdelivr.net/npm/jsonrepair/lib/umd/jsonrepair.min.js";
     //[RESTORED FROM V5] Key for cleaning up old instances on script reload
     const HANDLER_STORAGE_KEY = `__SAM_V6_EVENT_HANDLER_STORAGE__`;
@@ -728,12 +728,13 @@ $((() => {
         function diff(a, b, path) {
             if (a === b) return;
 
+            // Function-generated changes must survive readonly checks during history replay.
             if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
                 if (Array.isArray(a) && Array.isArray(b)) {
                     const minLen = Math.min(a.length, b.length);
                     for (let i = 0; i < minLen; i++) { diff(a[i], b[i], `${path}/${i}`); }
                     if (b.length > a.length) {
-                        for (let i = a.length; i < b.length; i++) { patches.push({ op: 'insert', path: `${path}/${i}`, value: b[i] }); }
+                        for (let i = a.length; i < b.length; i++) { patches.push({ op: 'forced_set', path: `${path}/${i}`, value: b[i] }); }
                     } else if (a.length > b.length) {
                         for (let i = a.length - 1; i >= b.length; i--) { patches.push({ op: 'remove', path: `${path}/${i}` }); }
                     }
@@ -741,12 +742,12 @@ $((() => {
                     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
                     for (const key of keys) {
                         const newPath = `${path}/${escapePath(key)}`;
-                        if (!b.hasOwnProperty(key)) { patches.push({ op: 'remove', path: newPath }); } 
-                        else if (!a.hasOwnProperty(key)) { patches.push({ op: 'insert', path: newPath, value: b[key] }); } 
+                        if (!b.hasOwnProperty(key)) { patches.push({ op: 'remove', path: newPath }); }
+                        else if (!a.hasOwnProperty(key)) { patches.push({ op: 'forced_set', path: newPath, value: b[key] }); }
                         else { diff(a[key], b[key], newPath); }
                     }
-                } else { patches.push({ op: 'replace', path: path, value: b }); }
-            } else { patches.push({ op: 'replace', path: path, value: b }); }
+                } else { patches.push({ op: 'forced_set', path: path, value: b }); }
+            } else { patches.push({ op: 'forced_set', path: path, value: b }); }
         }
 
         diff(obj1, obj2, '');
