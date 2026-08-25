@@ -1,12 +1,40 @@
 # SAM — Situational Awareness Manager
 
-**Version:** 6.2.14 “Lone Star”  
-**Platform:** SillyTavern-compatible script environment  
+**Version:** 6.3.1 “Ultimate Star”
+**Platform:** SillyTavern-compatible script environment
 **Primary script:** `sam_state_manager.js`
 
 > A long-context state persistence and hierarchical memory runtime for conversational LLM applications.
 
 [English](#english) · [中文](#中文)
+
+## What’s new in 6.3.1
+
+- Added mutually exclusive merged and independent variable-update modes. Independent mode reads `[update_rule]` worldbook entries and sends a separate request through a saved SillyTavern Connection Profile before writing the authoritative `<JSONPatch>` into the latest assistant message.
+- Reworked Ultimate Summary as a manual-only operation. It now processes every unsummarized message, including a final partial L2 chunk, and uses a dedicated system instruction that forbids narrative continuation and JSON Patch output.
+- Added three worldbook-input modes for summaries: disabled, all associated entries, or selective `K - X` filtering by comment. Selective mode defaults to `[important_setting]` and accepts comma-separated include and exclude keywords.
+- Fixed first-layer message refreshes so SAM no longer sends an invalid `-1` message ID when running beside database scripts.
+
+## v6.3.1 更新内容
+
+SAM 的“变量更新”页提供两个互斥模式：
+
+* **合并更新**：主回复本身包含 `<JSONPatch>`，SAM 直接解析并应用。
+* **独立更新**：主回复结束后，SAM 使用所选的 SillyTavern **Connection Profile** 单独发射一次后台请求，把返回的操作写入/替换最新主回复的 `<JSONPatch>`，然后应用到状态。该流程保留 swipe 与 regenerate 的历史回溯语义。
+
+独立更新只读取当前启用的全局、角色和聊天世界书中，条目名称（comment）包含 `[update_rule]` 的条目内容；其他世界书条目不会进入独立更新请求。独立更新提示词在 UI 中编辑并随 SAM 设置持久化。
+
+可用提示词宏：`{{update_rules}}`、`{{current_state}}`、`{{chat_history}}`、`{{latest_message}}`。
+
+## v6.3 终极总结
+
+终极总结只会由“手动运行终极总结”按钮启动，不会在普通生成、swipe 或 regenerate 后被动触发。每次手动运行会从 `summary_progress` 开始总结到当前聊天末尾，最后不足一个 L2 分块的记录也会被处理。
+
+总结请求使用专用 system 指令强制模型只输出总结，不续写角色叙事。世界书输入有三种模式：
+
+* **关闭**：不输入世界书条目。
+* **打开**：输入全部关联世界书条目。
+* **选择性**：comment 命中任一包含关键词的条目组成集合 K，再排除 comment 命中任一排除关键词的集合 X，最终输入 `K - X`。关键词使用逗号分割，默认包含关键词为 `[important_setting]`。
 
 ---
 
@@ -26,7 +54,7 @@ SAM is a client-side state and memory runtime for long-running LLM conversations
 
 SAM separates **narrative text**, **structured state**, and **compressed memory**. The LLM produces small state deltas inside `<JSONPatch>` blocks. SAM parses and applies those operations to its canonical state. When a chat is reloaded or altered, SAM reconstructs state from the newest available checkpoint or base state and replays later operations in order.
 
-Version 6.2.14 is an integrated runtime containing:
+Version 6.3.1 is an integrated runtime containing:
 
 - an extended JSON Patch processor;
 - backward-compatible checkpoint parsing;
@@ -199,7 +227,7 @@ Only `forced_set` may update such a path. This convention is useful for values d
 
 ### `responseSummary`
 
-Version 6.2.14 actively generates and manages L2 and L3 summaries.
+Version 6.3.1 actively generates and manages L2 and L3 summaries.
 
 - **L2:** condenses a configured range of chat messages.
 - **L3:** condenses a configured number of sequential L2 summaries.
@@ -250,7 +278,7 @@ and legacy/current V6-style blocks using:
 </SAMCheckpoint>
 ```
 
-Version 6.2.14 currently persists full state using the `$$$$$$data_block` markers.
+Version 6.3.1 currently persists full state using the `$$$$$$data_block` markers.
 
 ### Manual checkpoint
 
@@ -463,7 +491,7 @@ It also registers two macros:
 | `{{SAM_serialized_db}}` | Pretty-printed contents of `SAM_data.static` |
 | `{{SAM_serialized_memory}}` | Ordered L2/L3 summary text |
 
-The exact syntax for reading nested local variables depends on the surrounding SillyTavern script/template environment. The registered serialized macros are the stable integration surface provided directly by version 6.2.14.
+The exact syntax for reading nested local variables depends on the surrounding SillyTavern script/template environment. The registered serialized macros are the stable integration surface provided directly by version 6.3.1.
 
 ---
 
@@ -562,7 +590,7 @@ You need:
 3. a character associated with a World Info/worldbook;
 4. a model capable of following the `<JSONPatch>` output contract.
 
-The exact helper-plugin name and installation procedure can vary by SillyTavern setup. Version 6.2.14 expects functions such as event registration, variable updates, chat-message updates, raw generation, and worldbook access to be available.
+The exact helper-plugin name and installation procedure can vary by SillyTavern setup. Version 6.3.1 expects functions such as event registration, variable updates, chat-message updates, raw generation, and worldbook access to be available.
 
 ### Install the script
 
@@ -666,7 +694,7 @@ The UI is designed as a large movable panel and includes special yielding delays
 
 ## Reliability characteristics
 
-Version 6.2.14 includes several defensive mechanisms:
+Version 6.3.1 includes several defensive mechanisms:
 
 - cleanup of event handlers during hot reload;
 - serialization of lifecycle events through a queue;
@@ -811,9 +839,9 @@ dist/
 
 ---
 
-## Version note: 6.2.14 “Lone Star”
+## Version note: 6.3.1 “Ultimate Star”
 
-This README documents behaviour present in the 6.2.14 integrated script, including:
+This README documents behaviour present in the 6.3.1 integrated script, including:
 
 - `<JSONPatch>` extraction and extended operations;
 - canonical-state normalization;
@@ -848,7 +876,7 @@ SAM（Situational Awareness Manager，态势感知管理器）是一个面向长
 
 SAM 将**叙事文本**、**结构化状态**与**压缩记忆**分离。模型只需在 `<JSONPatch>` 区块中输出轻量级状态增量；SAM 负责解析并将这些操作应用到规范状态。当聊天重新载入或历史被修改时，SAM 会从最近的检查点或基础数据重建状态，并按顺序重放之后的操作。
 
-6.2.14 版“Lone Star”集成了：
+6.3.1 版“Ultimate Star”集成了：
 
 - 扩展 JSON Patch 处理器；
 - 向后兼容的检查点解析；
@@ -1017,7 +1045,7 @@ weather_id:
 
 ### `responseSummary`
 
-6.2.14 版实际生成和管理 L2 与 L3 摘要：
+6.3.1 版实际生成和管理 L2 与 L3 摘要：
 
 - **L2：**压缩一段可配置长度的聊天消息；
 - **L3：**压缩若干连续 L2 摘要；
@@ -1068,7 +1096,7 @@ $$$$$$data_block_end$$$$$$
 </SAMCheckpoint>
 ```
 
-6.2.14 当前写入完整状态时使用 `$$$$$$data_block` 标记。
+6.3.1 当前写入完整状态时使用 `$$$$$$data_block` 标记。
 
 ### 手动检查点
 
@@ -1281,7 +1309,7 @@ SAM_data
 | `{{SAM_serialized_db}}` | 格式化后的 `SAM_data.static` |
 | `{{SAM_serialized_memory}}` | 按顺序输出的 L2/L3 摘要 |
 
-读取嵌套本地变量的具体语法取决于所使用的 SillyTavern 脚本/模板环境。上述两个序列化宏是 6.2.14 直接注册的稳定接口。
+读取嵌套本地变量的具体语法取决于所使用的 SillyTavern 脚本/模板环境。上述两个序列化宏是 6.3.1 直接注册的稳定接口。
 
 ---
 
@@ -1380,7 +1408,7 @@ SAM 可以从 World Info 加载函数库。函数能够直接更新状态，也�
 3. 已关联 World Info/worldbook 的角色；
 4. 能遵守 `<JSONPatch>` 输出约定的模型。
 
-不同 SillyTavern 配置使用的助手插件名称和安装方法可能不同。6.2.14 需要事件注册、变量更新、聊天消息更新、静默/原始生成和 worldbook 访问等能力。
+不同 SillyTavern 配置使用的助手插件名称和安装方法可能不同。6.3.1 需要事件注册、变量更新、聊天消息更新、静默/原始生成和 worldbook 访问等能力。
 
 ### 安装脚本
 
@@ -1483,7 +1511,7 @@ SAM 浮动管理器提供：
 
 ## 可靠性机制
 
-6.2.14 包含以下防御性机制：
+6.3.1 包含以下防御性机制：
 
 - 热重载时清理旧事件处理器；
 - 生命周期事件队列串行执行；
@@ -1628,9 +1656,9 @@ dist/
 
 ---
 
-## 版本说明：6.2.14 “Lone Star”
+## 版本说明：6.3.1 “Ultimate Star”
 
-本文档对应 6.2.14 集成脚本中已经存在的行为，包括：
+本文档对应 6.3.1 集成脚本中已经存在的行为，包括：
 
 - `<JSONPatch>` 提取与扩展操作；
 - 规范状态规整；
