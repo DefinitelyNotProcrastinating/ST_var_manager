@@ -4,6 +4,7 @@
   "private": true,
   "description": "A variable management plugin for sillyTavern.",
   "scripts": {
+    "test": "node --test",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

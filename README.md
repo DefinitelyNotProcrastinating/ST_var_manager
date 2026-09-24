@@ -14,6 +14,7 @@
 - Reworked Ultimate Summary as a manual-only operation. It now processes every unsummarized message, including a final partial L2 chunk, and uses a dedicated system instruction that forbids narrative continuation and JSON Patch output.
 - Added three worldbook-input modes for summaries: disabled, all associated entries, or selective `K - X` filtering by comment. Selective mode defaults to `[important_setting]` and accepts comma-separated include and exclude keywords.
 - Fixed first-layer message refreshes so SAM no longer sends an invalid `-1` message ID when running beside database scripts.
+- Added the `REFRESH_SAM_VARIABLES` broadcast so other UI and JavaScript components can request a checkpoint-based state rebuild.
 
 ## v6.3.1 更新内容
 
@@ -23,6 +24,8 @@ SAM 的“变量更新”页提供两个互斥模式：
 * **独立更新**：主回复结束后，SAM 使用所选的 SillyTavern **Connection Profile** 单独发射一次后台请求，把返回的操作写入/替换最新主回复的 `<JSONPatch>`，然后应用到状态。该流程保留 swipe 与 regenerate 的历史回溯语义。
 
 独立更新只读取当前启用的全局、角色和聊天世界书中，条目名称（comment）包含 `[update_rule]` 的条目内容；其他世界书条目不会进入独立更新请求。独立更新提示词在 UI 中编辑并随 SAM 设置持久化。
+
+其他组件可发送 `eventEmit('REFRESH_SAM_VARIABLES')` 请求从最新检查点（或基础数据）重建 `SAM_data`。若正在生成或总结，SAM 会在恢复空闲后执行重建；此广播不发起模型请求，也不修改聊天正文。
 
 可用提示词宏：`{{update_rules}}`、`{{current_state}}`、`{{chat_history}}`、`{{latest_message}}`。
 
@@ -148,7 +151,7 @@ The generation lifecycle is coordinated through four runtime states:
 | `PROCESSING` | Parsing and applying the latest assistant message |
 | `SUMMARIZING` | Running L2/L3 memory compression |
 
-Events are serialized through an internal queue. Events received during processing or summarization are rejected rather than applied concurrently.
+Events are serialized through an internal queue. Ordinary events received during processing or summarization are rejected rather than applied concurrently; `REFRESH_SAM_VARIABLES` is deferred until SAM is idle.
 
 A generation watchdog detects cases where the interface stops generating but the expected completion event is not received. A separate UI heartbeat removes a stale floating window if its runtime instance has disconnected.
 
@@ -295,6 +298,7 @@ SAM rebuilds or synchronizes state after:
 - chat change;
 - manual reset;
 - initial context loading.
+- receipt of the `REFRESH_SAM_VARIABLES` broadcast.
 
 ---
 
@@ -604,7 +608,7 @@ SAM removes handlers and UI from an older runtime instance before starting the n
 
 ### Activate SAM in World Info
 
-SAM only activates for a character whose associated World Info contains an entry with the comment:
+SAM activates when a character's associated World Info contains the following comment. An `[update_rule]` entry in an active worldbook can also activate the data system:
 
 ```text
 __SAM_IDENTIFIER__
@@ -1113,6 +1117,7 @@ $$$$$$data_block_end$$$$$$
 - 切换聊天；
 - 手动重置；
 - 初次加载上下文。
+- 收到 `REFRESH_SAM_VARIABLES` 广播。
 
 ---
 
@@ -1422,7 +1427,7 @@ SAM 可以从 World Info 加载函数库。函数能够直接更新状态，也�
 
 ### 在 World Info 中激活 SAM
 
-SAM 只会为关联 World Info 中存在以下 comment 的角色启用：
+SAM 会为关联 World Info 中存在以下 comment 的角色启用；独立模式也可通过活动世界书中的 `[update_rule]` 条目激活：
 
 ```text
 __SAM_IDENTIFIER__

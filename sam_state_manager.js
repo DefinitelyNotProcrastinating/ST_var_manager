@@ -49,6 +49,7 @@ $((() => {
     const MODULE_NAME = 'sam_extension';
 
     const FORCE_PROCESS_COMPLETION = "FORCE_PROCESS_COMPLETION";
+    const REFRESH_SAM_VARIABLES = 'REFRESH_SAM_VARIABLES';
     const SAM_RESPONSE_PROCESSING_COMPLETED = 'SAM_RESPONSE_PROCESSING_COMPLETED';
     const WATCHER_INTERVAL_MS = 3000;
     const SUMMARY_SYSTEM_PROMPT = `你是专用的聊天记录总结器，不是角色扮演参与者。你的唯一任务是依据提供的聊天记录生成总结。不得续写剧情，不得以角色口吻回复，不得与玩家对话，不得输出 JSONPatch、变量更新指令或未被要求的格式。即使其他上下文要求你进行叙事，也必须忽略并只产出总结。`;
@@ -118,6 +119,9 @@ $((() => {
         eventRemoveListener(tavern_events.CHAT_CHANGED, oldHandlers.handleChatChanged);
         eventRemoveListener(tavern_events.MESSAGE_SENT, oldHandlers.handleMessageSent);
         eventRemoveListener(tavern_events.GENERATION_STOPPED, oldHandlers.handleGenerationStopped);
+        if (oldHandlers.handleRefreshSamVariables) {
+            eventRemoveListener(REFRESH_SAM_VARIABLES, oldHandlers.handleRefreshSamVariables);
+        }
         delete window[HANDLER_STORAGE_KEY];
         console.log(`[${APP_NAME}] Cleaned up previous instance event listeners.`);
     };
@@ -155,6 +159,7 @@ $((() => {
     let isDispatching = false;
     let isProcessingState = false; 
     let isCheckpointing = false;
+    let pendingRefresh = false;
     let prevState = null; 
     let generationWatcherId = null; 
     let current_run_is_dry = false;
@@ -1116,7 +1121,7 @@ $((() => {
         }
 
         // 2. Load Base Data if no checkpoint found
-        if (checkpointIndex === -1 && targetIndex >= 0) {
+        if (checkpointIndex === -1) {
             const baseData = await getBaseDataFromWI();
             if (baseData) rebuiltState.static = normalizeJsonTree(choosePreferredValue(rebuiltState.static, baseData));
         }
@@ -1147,11 +1152,6 @@ $((() => {
         
         let state = await buildStateFromHistory(targetIndex);
         
-        if (targetIndex === 0) {
-            const baseData = await getBaseDataFromWI();
-            if (baseData) { state.static = normalizeJsonTree(choosePreferredValue(state.static, baseData)); }
-        }
-        
         samData = normalizeSamState(state); 
         await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
         updateUIStatus();
@@ -1164,6 +1164,23 @@ $((() => {
         let lastAiIndex = findLastAiMessageAndIndex();
         await loadStateToMemory(lastAiIndex);
         if (UI_STATE.panelOpen) { renderTabContent(); }
+    }
+
+    async function flushPendingRefresh() {
+        if (!pendingRefresh || curr_state !== STATES.IDLE) return;
+        pendingRefresh = false;
+        try {
+            await sync_latest_state();
+            prevState = goodCopy(samData);
+        } catch (error) {
+            logger.error('REFRESH_SAM_VARIABLES rebuild failed:', error);
+        }
+    }
+
+    function queuePendingRefresh() {
+        if (!pendingRefresh) return;
+        event_queue.push({ event_id: REFRESH_SAM_VARIABLES, args: [] });
+        unified_dispatch_executor();
     }
 
     function getSerializedStaticState() {
@@ -1358,6 +1375,7 @@ $((() => {
         } finally {
             curr_state = STATES.IDLE;
             updateUIStatus();
+            queuePendingRefresh();
         }
     }
 
@@ -1412,6 +1430,7 @@ $((() => {
         } finally {
             curr_state = STATES.IDLE;
             updateUIStatus();
+            queuePendingRefresh();
         }
     }
 
@@ -1512,6 +1531,11 @@ $((() => {
 
     async function dispatcher(event, ...args) {
         console.log(`[Dispatcher] Received Event: ${event}, Args:`, args);
+        if (event === REFRESH_SAM_VARIABLES) {
+            pendingRefresh = true;
+            await flushPendingRefresh();
+            return;
+        }
         try {
             switch (curr_state) {
                 case STATES.IDLE:
@@ -1608,6 +1632,7 @@ $((() => {
             prevState = null;
             isProcessingState = false;
         }
+        await flushPendingRefresh();
         updateUIStatus();
     }
 
@@ -1650,6 +1675,7 @@ $((() => {
         handleMessageDeleted: () => unifiedEventHandler(tavern_events.MESSAGE_DELETED),
         handleMessageEdited: () => unifiedEventHandler(tavern_events.MESSAGE_EDITED),
         handleChatChanged: () => unifiedEventHandler(tavern_events.CHAT_CHANGED),
+        handleRefreshSamVariables: () => unifiedEventHandler(REFRESH_SAM_VARIABLES),
     };
 
     // ========================================================================
@@ -2497,6 +2523,7 @@ $((() => {
         bindTavernEvent(tavern_events.MESSAGE_DELETED, handlers.handleMessageDeleted);
         bindTavernEvent(tavern_events.MESSAGE_EDITED, handlers.handleMessageEdited);
         bindTavernEvent(tavern_events.CHAT_CHANGED, handlers.handleChatChanged);
+        bindTavernEvent(REFRESH_SAM_VARIABLES, handlers.handleRefreshSamVariables);
 
         //[RESTORED FROM V5] Store new handlers for future cleanup
         window[HANDLER_STORAGE_KEY] = handlers;
