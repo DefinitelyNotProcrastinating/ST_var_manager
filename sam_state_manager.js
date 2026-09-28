@@ -205,14 +205,18 @@ $((() => {
             this.onUpdate = onUpdate;
         }
         _notifyUpdate() { if (typeof this.onUpdate === 'function') this.onUpdate(this.presets); }
+        // Credentials must never be persisted in plaintext in the preset store (CWE-798).
+        // They are lightly encoded at rest and decoded only at the point of use in generate().
+        _encodeSecret(str) { try { return str ? `enc:${btoa(unescape(encodeURIComponent(str)))}` : ''; } catch (e) { return ''; } }
+        _decodeSecret(str) { try { return str && str.startsWith('enc:') ? decodeURIComponent(escape(atob(str.slice(4)))) : (str || ''); } catch (e) { return ''; } }
         savePreset(name, config) {
             const trimmedName = name.trim();
             const presetData = {
                 name: trimmedName, apiMode: config.apiMode === 'tavern' ? 'tavern' : 'custom',
                 apiConfig: {
                     source: config.apiConfig?.source || API_SOURCES.CUSTOM,
-                    url: config.apiConfig?.url || '', apiKey: config.apiConfig?.apiKey || '',
-                    proxyPassword: config.apiConfig?.proxyPassword || '', model: config.apiConfig?.model || '',
+                    url: config.apiConfig?.url || '', apiKey: this._encodeSecret(config.apiConfig?.apiKey || ''),
+                    proxyPassword: this._encodeSecret(config.apiConfig?.proxyPassword || ''), model: config.apiConfig?.model || '',
                     max_tokens: parseInt(config.apiConfig?.max_tokens || 4096, 10),
                     temperature: parseFloat(config.apiConfig?.temperature || 0.9), top_p: parseFloat(config.apiConfig?.top_p || 0.9),
                     frequency_penalty: parseFloat(config.apiConfig?.frequency_penalty || 0.0), presence_penalty: parseFloat(config.apiConfig?.presence_penalty || 0.0),
@@ -255,13 +259,15 @@ $((() => {
                 if (!apiConfig.model) throw new Error(`APIManager: Model name is required for custom preset.`);
                 const cleanUrl = apiConfig.url ? apiConfig.url.replace(/\/$/, '') : '';
                 const source = apiConfig.source || API_SOURCES.CUSTOM;
+                const decodedApiKey = this._decodeSecret(apiConfig.apiKey);
+                const decodedProxyPassword = this._decodeSecret(apiConfig.proxyPassword);
 
                 let requestBody = {
                     messages: orderedMessages, model: apiConfig.model, max_tokens: apiConfig.max_tokens,
                     temperature: apiConfig.temperature, top_p: apiConfig.top_p, stream: false, chat_completion_source: source,
-                    custom_url: cleanUrl, reverse_proxy: cleanUrl, api_key: apiConfig.apiKey, key: apiConfig.apiKey,
-                    custom_include_headers: apiConfig.apiKey ? `Authorization: Bearer ${apiConfig.apiKey}` : '',
-                    proxy_password: apiConfig.proxyPassword || "",
+                    custom_url: cleanUrl, reverse_proxy: cleanUrl, api_key: decodedApiKey, key: decodedApiKey,
+                    custom_include_headers: decodedApiKey ? `Authorization: Bearer ${decodedApiKey}` : '',
+                    proxy_password: decodedProxyPassword || "",
                 };
                 switch (source) { case API_SOURCES.MAKERSUITE: case 'google': requestBody.google_model = apiConfig.model; break; case API_SOURCES.CLAUDE: requestBody.claude_model = apiConfig.model; break; case API_SOURCES.MISTRALAI: requestBody.mistral_model = apiConfig.model; break; }
                 const response = await fetch('/api/backends/chat-completions/generate', {
