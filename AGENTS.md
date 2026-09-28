@@ -16,6 +16,7 @@
 
 1. `sam_state_manager.js` 是运行入口。保持 `SAM_data` 的包装结构、`static` 根路径、旧检查点解析和 `<JSONPatch>` 历史重放兼容；尤其不能破坏 swipe / regenerate 的“先回退、再重放”流程。
 2. 更新模式互斥：`merged` 读主回复 Patch；`independent` 只读 `[update_rule]` 条目，用一次独立请求产生权威 Patch 并写入主回复。独立请求失败不得留下主回复原 Patch 供重放。
+   独立模式的手动重更新必须从目标楼层之前重建基线，不能再次叠加本楼层旧 Patch；成功后替换旧 Patch 与旧检查点，失败时保留原文。若原检查点含摘要数据，应保留其总结进度。
 3. 外部刷新事件名精确为 `REFRESH_SAM_VARIABLES`。事件要走串行处理，忙碌时延后，并在脚本热重载/停止时解除监听；重建只覆盖 `SAM_data`，不能清空其他脚本的本地变量，也不能写入非法楼层 ID。
 4. 终极总结是手动功能。保留 `summary_progress` 的分块边界、末尾不足一块的处理、专用总结 system 指令及世界书 `off`/`all`/`selective`（K - X）过滤；不要从普通生成事件被动启动。
 5. 事件处理、聊天楼层更新和异步 API 请求可能交错。修改时检查 `IDLE`、`AWAIT_GENERATION`、`PROCESSING`、`SUMMARIZING` 四个状态，避免旧聊天或旧生成结果写回当前聊天。

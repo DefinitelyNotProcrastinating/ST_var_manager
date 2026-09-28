@@ -1043,12 +1043,12 @@ $((() => {
         )).join('\n\n');
     }
 
-    async function requestIndependentOperations(messageIndex, stateBeforeMessage) {
+    async function requestIndependentOperations(messageIndex, stateBeforeMessage, rulesOverride = null) {
         const settings = samSettings.independent_update || {};
         const profileId = settings.connection_profile_id;
         if (!profileId) throw new Error('尚未选择独立更新使用的 Connection Profile。');
 
-        const rules = await getIndependentUpdateRules();
+        const rules = rulesOverride || await getIndependentUpdateRules();
         if (rules.length === 0) {
             logger.info('Independent update skipped: no [update_rule] entries found.');
             return [];
@@ -1071,7 +1071,11 @@ $((() => {
             update_rules: formatIndependentUpdateRules(rules),
             current_state: JSON.stringify(normalizeSamState(stateBeforeMessage).static, null, 2),
             chat_history: chatHistory,
-            latest_message: String(latestMessage.mes || '').replace(UPDATE_BLOCK_REMOVE_REGEX, '').trim(),
+            latest_message: String(latestMessage.mes || '')
+                .replace(CHECKPOINT_STRIP_REGEX, '')
+                .replace(OLD_STATE_REMOVE_REGEX, '')
+                .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
+                .trim(),
         });
 
         const service = getConnectionManagerService();
@@ -1210,7 +1214,7 @@ $((() => {
         });
     }
 
-    async function persistSamStateToLatestMessage() {
+    async function persistSamStateToLatestMessage(targetGuard = null, onMessageWrite = null) {
         const chat = SillyTavern.getContext().chat;
         let lastAiIndex = findLastAiMessageAndIndex();
         if (lastAiIndex === -1) return;
@@ -1218,8 +1222,10 @@ $((() => {
         samData = normalizeSamState(samData);
         let cleanNarrative = chat[lastAiIndex].mes.replace(CHECKPOINT_STRIP_REGEX, '').replace(OLD_STATE_REMOVE_REGEX, '').trim();
         const stateString = await chunkedStringify(samData);
+        if (targetGuard && !targetGuard()) throw new Error('目标聊天或楼层已变化，停止写入检查点。');
         const finalContent = `${cleanNarrative}\n\n${OLD_START_MARKER}\n${stateString}\n${OLD_END_MARKER}`;
         chat[lastAiIndex].mes = finalContent;
+        if (onMessageWrite) onMessageWrite(finalContent);
         await setChatMessages([{ message_id: lastAiIndex, message: finalContent }]);
     }
 
@@ -1434,19 +1440,20 @@ $((() => {
         }
     }
 
-    async function processMessageState(index, operationOverride = null) {
-        if (isProcessingState) { return; }
+    async function processMessageState(index, operationOverride = null, stateOverride = null, targetGuard = null, onMessageWrite = null) {
+        if (isProcessingState) { return false; }
         isProcessingState = true;
 
         try {
             const chat = SillyTavern.getContext().chat;
             if (index === "{{lastMessageId}}") { index = chat.length - 1; }
             const lastAIMessage = chat[index];
-            if (!lastAIMessage || lastAIMessage.is_user) return;
+            if (!lastAIMessage || lastAIMessage.is_user) return false;
 
             // [RESTORED FROM V5] Strict use of the prevState cache
             let state;
-            if (prevState) { state = goodCopy(prevState); }
+            if (stateOverride) { state = goodCopy(stateOverride); }
+            else if (prevState) { state = goodCopy(prevState); }
             else { state = await buildStateFromHistory(index - 1); }
 
             let messageContent = lastAIMessage.mes;
@@ -1457,10 +1464,12 @@ $((() => {
             const periodicOps = samFunctions.filter(f => f.periodic).map(f => ({ op: 'func', func_name: f.func_name, params:[] }));
 
             const { state: newState, generatedDiffs } = await applyOperationsToState([...opsFromMessage, ...periodicOps], state, true);
+            if (targetGuard && !targetGuard()) throw new Error('目标聊天或楼层已变化，停止变量重更新。');
             samData = normalizeSamState(newState);
             
             //[RESTORED FROM V5] Immediately push updated variable memory
             await updateVariablesWith(variables => { _.set(variables, "SAM_data", goodCopy(samData)); return variables });
+            if (targetGuard && !targetGuard()) throw new Error('目标聊天或楼层已变化，停止变量重更新。');
 
             // Build the new block HTML if needed
             let newBlockHTML = "";
@@ -1499,16 +1508,119 @@ $((() => {
             cleanNarrative = cleanNarrative.trim();
 
             chat[index].mes = cleanNarrative;
+            if (onMessageWrite) onMessageWrite(cleanNarrative);
             await setChatMessages([{ message_id: index, message: cleanNarrative }]);
 
             await applyDataToChat(samData);
 
             eventEmit(SAM_RESPONSE_PROCESSING_COMPLETED);
+            return true;
 
         } catch (error) {
             logger.error("Error in processMessageState:", error);
+            return false;
         } finally {
             isProcessingState = false;
+        }
+    }
+
+    async function regenerateLatestVariableUpdate() {
+        if (!go_flag || !samSettings.data_enable) {
+            toastr.warning('变量系统未激活。');
+            return false;
+        }
+        if (samSettings.update_mode !== 'independent') {
+            toastr.warning('请先保存并启用独立更新模式，再重新生成变量更新。');
+            return false;
+        }
+        if (curr_state !== STATES.IDLE || isProcessingState || isCheckpointing) {
+            toastr.warning('SAM 正在处理其他任务，请稍后再试。');
+            return false;
+        }
+        if (!samSettings.independent_update?.connection_profile_id) {
+            toastr.warning('请先选择并保存独立更新的 Connection Profile。');
+            return false;
+        }
+
+        const chat = SillyTavern.getContext().chat;
+        const messageIndex = findLastAiMessageAndIndex();
+        if (messageIndex < 0 || messageIndex !== chat.length - 1) {
+            toastr.warning('请在最新 AI 回复楼层重新生成变量更新。');
+            return false;
+        }
+
+        const originalContent = String(chat[messageIndex].mes || '');
+        const cleanedContent = originalContent
+            .replace(CHECKPOINT_STRIP_REGEX, '')
+            .replace(OLD_STATE_REMOVE_REGEX, '')
+            .replace(UPDATE_BLOCK_REMOVE_REGEX, '')
+            .trim();
+        const hadCheckpoint = CHECKPOINT_REGEX.test(originalContent) || OLD_STATE_PARSE_REGEX.test(originalContent);
+        const sameChat = () => SillyTavern.getContext().chat === chat && chat[messageIndex] && !chat[messageIndex].is_user;
+        const unchangedOriginalFloor = () => sameChat() && chat[messageIndex].mes === originalContent;
+        const unchangedCleanFloor = () => sameChat() && chat[messageIndex].mes === cleanedContent;
+        let removedOldUpdate = false;
+        let ownedContent = null;
+
+        curr_state = STATES.PROCESSING;
+        updateUIStatus();
+        try {
+            const rules = await getIndependentUpdateRules();
+            if (rules.length === 0) throw new Error('活动世界书中没有 [update_rule] 条目。');
+            const oldState = hadCheckpoint ? await buildStateFromHistory(messageIndex) : null;
+            if (!unchangedOriginalFloor()) throw new Error('目标聊天或楼层已变化，停止变量重更新。');
+
+            // Exclude this floor's old patch/checkpoint while rebuilding. Commit the cleaned floor only after the API succeeds.
+            const stateBeforeUpdate = goodCopy(await loadStateToMemory(messageIndex - 1));
+            if (!unchangedOriginalFloor()) throw new Error('目标聊天或楼层已变化，停止变量重更新。');
+
+            // A checkpoint on this floor may also contain manual summary work, which is not part of the update being regenerated.
+            if (oldState) {
+                stateBeforeUpdate.responseSummary = goodCopy(oldState.responseSummary);
+                stateBeforeUpdate.summary_progress = oldState.summary_progress;
+                stateBeforeUpdate.summary_failed_progress = oldState.summary_failed_progress;
+                samData = normalizeSamState(stateBeforeUpdate);
+                await updateVariablesWith(variables => { _.set(variables, 'SAM_data', goodCopy(samData)); return variables; });
+            }
+
+            const newOperations = await requestIndependentOperations(messageIndex, stateBeforeUpdate, rules);
+            if (!unchangedOriginalFloor()) throw new Error('目标聊天或楼层已变化，停止变量重更新。');
+            chat[messageIndex].mes = cleanedContent;
+            removedOldUpdate = true;
+            ownedContent = cleanedContent;
+            await setChatMessages([{ message_id: messageIndex, message: cleanedContent }]);
+            const applied = await processMessageState(messageIndex, newOperations, stateBeforeUpdate, unchangedCleanFloor, content => { ownedContent = content; });
+            if (!applied) throw new Error('应用新变量更新失败。');
+
+            if (hadCheckpoint) {
+                if (!sameChat() || findLastAiMessageAndIndex() !== messageIndex) {
+                    throw new Error('目标聊天或楼层已变化，无法重写检查点。');
+                }
+                const updatedContent = chat[messageIndex].mes;
+                await persistSamStateToLatestMessage(
+                    () => sameChat() && chat[messageIndex].mes === updatedContent,
+                    content => { ownedContent = content; },
+                );
+            }
+            prevState = null;
+            if (UI_STATE.panelOpen) renderTabContent();
+            toastr.success('本轮变量更新已重新生成。');
+            return true;
+        } catch (error) {
+            logger.error('Regenerate variable update failed:', error);
+            if (removedOldUpdate && sameChat() && chat[messageIndex].mes === ownedContent) {
+                chat[messageIndex].mes = originalContent;
+                try { await setChatMessages([{ message_id: messageIndex, message: originalContent }]); }
+                catch (restoreError) { logger.error('Unable to restore original message:', restoreError); }
+            }
+            try { await sync_latest_state(); }
+            catch (syncError) { logger.error('Unable to rebuild after failed regeneration:', syncError); }
+            toastr.error(`变量重更新失败：${error.message}`);
+            return false;
+        } finally {
+            curr_state = STATES.IDLE;
+            updateUIStatus();
+            queuePendingRefresh();
         }
     }
 
@@ -1817,7 +1929,11 @@ $((() => {
                 <div class="sam_form_row"><label class="sam_label">独立更新预设（提示词）</label><textarea class="sam_textarea" id="sam_update_prompt" style="min-height:320px;">${escapeHtml(independent.prompt || '')}</textarea></div>
                 <p style="font-size:11px; color:#777;">可用宏：<code>{{update_rules}}</code>、<code>{{current_state}}</code>、<code>{{chat_history}}</code>、<code>{{latest_message}}</code>，以及酒馆原生宏。</p>
               </div>
-              <div class="sam_actions" style="margin-top:20px;"><button class="sam_btn sam_btn_primary" id="btn_save_update">保存更新配置</button></div>
+              <div class="sam_actions" style="margin-top:20px;">
+                <button class="sam_btn sam_btn_primary" id="btn_save_update">保存更新配置</button>
+                <button class="sam_btn sam_btn_secondary" id="btn_regenerate_update" title="仅在已保存的独立更新模式中可用" ${samSettings.update_mode !== 'independent' || !go_flag || !samSettings.data_enable ? 'disabled' : ''}>重新生成变量更新</button>
+              </div>
+              <p style="font-size:11px; color:#777;">仅独立模式可用：针对最新 AI 楼层移除旧变量更新、重建更新前状态，再用已保存的配置重新请求；失败时恢复原楼层。</p>
             </div>`;
         } else if (T === 'SUMMARY') {
             html = `<div>
@@ -2025,6 +2141,8 @@ $((() => {
             const modeSelect = C.querySelector('#sam_update_mode');
             modeSelect.onchange = () => {
                 C.querySelector('#sam_independent_settings').style.display = modeSelect.value === 'independent' ? '' : 'none';
+                C.querySelector('#btn_regenerate_update').disabled = modeSelect.value !== 'independent'
+                    || samSettings.update_mode !== 'independent' || !go_flag || !samSettings.data_enable;
             };
             C.querySelector('#btn_save_update').onclick = async () => {
                 const mode = modeSelect.value === 'independent' ? 'independent' : 'merged';
@@ -2044,6 +2162,7 @@ $((() => {
                 updateUIStatus();
                 toastr.success(mode === 'independent' ? '已启用独立更新模式' : '已启用合并更新模式');
             };
+            C.querySelector('#btn_regenerate_update').onclick = regenerateLatestVariableUpdate;
         }
         else if (T === 'SUMMARY') {
             C.querySelector('#toggle_L2')?.closest('.sam_form_row')?.remove();
